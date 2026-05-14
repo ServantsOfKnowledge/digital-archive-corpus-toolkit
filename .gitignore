@@ -1,0 +1,27 @@
+# Downloads and corpus data
+tdl_corpus/
+tdl_verify/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.env
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Secrets
+*.token
+**/credentials*
