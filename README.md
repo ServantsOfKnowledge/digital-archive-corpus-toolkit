@@ -2,34 +2,16 @@
 
 A comprehensive downloader, metadata scraper, and corpus builder for digital archival collections. Developed by **ServantsOfKnowledge** for digital archiving projects.
 
-## Download Progress
-
-**7,447 items downloaded · ~170 GB total · 305 GB free remaining**
-
-| Category | Downloaded | Total | Size |
-|----------|-----------:|------:|-----:|
-| Audio | 124 | 125 | 12 GB |
-| Author Bio | 196 | 196 | 23 MB |
-| Book | 24 | 42,043 | 3.7 GB |
-| Coin | 348 | 673 | 709 MB |
-| Copper Plate | 192 | 192 | 188 MB |
-| Document | 1,551 | 4,769 | 156 GB |
-| Excavation | 55 | 55 | 73 MB |
-| Historical Monument | 122 | 124 | 149 MB |
-| Inscription | 1,341 | 1,922 | 2.3 GB |
-| Map | 1,212 | 1,862 | 16 GB |
-| Painting | 61 | 65 | 245 MB |
-| Photograph | 49 | 53 | 283 MB |
-| Pre-historic | 158 | 166 | 307 MB |
-| Religious Place | 370 | 370 | 560 MB |
-| Sculpture | 1,635 | 1,645 | 6.8 GB |
-| Video | 10 | 10 | 1.2 GB |
-
-*Largest categories (Periodical 29,951, Book 42,043) not yet started — awaiting additional storage.*
-
 ## Overview
 
-This project downloads documents from online digital archives along with full bibliographic metadata, organized for research corpus use. It supports parallel downloads, resume capability, and automatically generates Internet Archive-ready metadata.
+This toolkit is designed for systematically downloading, indexing, and archiving large-scale digital collections. It handles the full pipeline — from crawling category listings and scraping bibliographic metadata to parallel file downloads and corpus index generation — producing Internet Archive-ready outputs suitable for research, preservation, and bulk analysis.
+
+Key architectural principles:
+- **Resumable by design** — every category tracks its own progress; interrupted downloads pick up where they left off
+- **Idempotent** — re-running produces identical directory structures via deterministic hashing
+- **Parallel by default** — configurable worker pool for concurrent downloads
+- **Category-isolated output** — each media type (Book, Document, Map, etc.) lands in its own directory for independent processing or offloading
+- **IA-ready metadata** — each downloaded item includes a `metadata.json` structured for Internet Archive upload
 
 ## Script: `tdl_downloader.py`
 
