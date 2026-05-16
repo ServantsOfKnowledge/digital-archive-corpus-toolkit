@@ -135,6 +135,26 @@ python tdl_downloader.py download --urls "https://..." --dir output_dir</code></
 <pre><code>python tdl_downloader.py corpus --dir tdl_verify --name tdl_corpus --csv</code></pre>
 </div>
 
+<div class="card blue">
+<strong>upload</strong> &mdash; Upload downloaded items to Internet Archive
+<pre><code># Preview
+python tdl_upload.py --dry-run
+
+# Upload a category
+python tdl_upload.py --cat Book --workers 3
+
+# Upload all categories
+python tdl_upload.py --workers 3
+
+# Retry failed
+python tdl_upload.py --retry-failed</code></pre>
+</div>
+
+<div class="card green">
+<strong>status</strong> &mdash; Live download progress
+<pre><code>./tdl_status.py</code></pre>
+</div>
+
 <h3>All Categories</h3>
 
 <table>

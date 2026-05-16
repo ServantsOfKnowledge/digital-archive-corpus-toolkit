@@ -83,6 +83,34 @@ python tdl_downloader.py fetch --cat-id 20 --dir tdl_output --workers 5
 python tdl_downloader.py corpus --dir tdl_verify --name tdl_corpus --csv
 ```
 
+## Script: `tdl_upload.py`
+
+Uploads downloaded items to Internet Archive. Zips each item folder and submits with `tdl.{id}` identifiers.
+
+```bash
+# Preview what would be uploaded
+python tdl_upload.py --dry-run
+
+# Upload a specific category
+python tdl_upload.py --cat Book --workers 3
+
+# Upload everything across all categories
+python tdl_upload.py --workers 3
+
+# Retry previously failed uploads
+python tdl_upload.py --retry-failed
+```
+
+Requires `ia` CLI: `pip install internetarchive && ia configure`
+
+## Script: `tdl_status.py`
+
+Shows live download progress across all categories with running process indicators.
+
+```bash
+./tdl_status.py
+```
+
 ## Output Structure
 
 ```

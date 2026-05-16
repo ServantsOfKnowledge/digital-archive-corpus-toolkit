@@ -22,6 +22,11 @@ venv/
 *.swp
 *.swo
 
+# Runtime state
+upload_progress.json
+upload_failed.json
+
 # Secrets
 *.token
 **/credentials*
+*.ini
