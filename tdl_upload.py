@@ -15,6 +15,11 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
+try:
+    from unidecode import unidecode
+except ImportError:
+    unidecode = None
+
 CORPUS = Path(__file__).parent / "tdl_corpus"
 COLLECTION = "TamilVirtualAcademy"
 WORKERS = 3
@@ -30,7 +35,7 @@ CATEGORIES = [
 
 def extract_english(text: str) -> str:
     ascii_chars = re.findall(r'[a-zA-Z0-9_.()&,;:!?\'" -]+', text)
-    parts = [p.strip() for p in ascii_chars if p.strip()]
+    parts = [p.strip() for p in ascii_chars if p.strip() and len(p.strip()) > 1]
     return ' '.join(parts) if parts else ''
 
 PREFIX = "tdl."
@@ -47,17 +52,30 @@ def make_identifier(cat: str, folder: Path) -> str:
     art_id = meta.get("identifier", "")
     title = meta.get("title", folder.name)
 
-    # Use article ID as base
     base = art_id if art_id else folder.name.split("_")[0]
 
-    # If ID already has tdl_ prefix, use tdl.id directly
+    # If ID already has tdl_ prefix, append a title slug from the folder name
     if base.startswith("tdl_"):
+        # folder: tdl_{hash}_{title} → extract title part after second _
+        parts = folder.name.split("_", 2)
+        title_part = parts[2] if len(parts) > 2 else ""
+        if title_part and unidecode:
+            slug = sanitize_identifier(unidecode(title_part))
+            if slug:
+                return f"{PREFIX}{base}-{slug}"
         return f"{PREFIX}{base}"
 
     # Extract English/Latin text from title
     english = extract_english(title)
 
-    # If no English text, use a short hash of the folder name
+    # If no English text, transliterate the Tamil title
+    if not english and unidecode:
+        translit = unidecode(title)
+        slug = sanitize_identifier(translit)
+        if slug:
+            return f"{PREFIX}{base}-{slug}"
+
+    # Fallback to hash
     if not english:
         h = hashlib.md5(folder.name.encode()).hexdigest()[:8]
         return f"{PREFIX}{base}-{h}"
