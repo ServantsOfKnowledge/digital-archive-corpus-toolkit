@@ -62,6 +62,28 @@ def find_zip_on_ia(ident: str):
             return f["name"]
     return None
 
+def run_with_retry(cmd, timeout=600, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            if r.returncode == 0:
+                return r
+            err = (r.stderr.strip() or r.stdout.strip()).lower()
+            if any(x in err for x in ["timeout", "timed out", "connection", "reset", "slowdown"]):
+                if attempt < max_retries - 1:
+                    wait = 5 * (2 ** attempt)
+                    print(f"  ! transient error, retrying in {wait}s...")
+                    __import__('time').sleep(wait)
+                    continue
+            raise RuntimeError(f"{r.stderr.strip() or r.stdout.strip()[:200]}")
+        except subprocess.TimeoutExpired:
+            if attempt < max_retries - 1:
+                wait = 5 * (2 ** attempt)
+                print(f"  ! timeout, retrying in {wait}s...")
+                __import__('time').sleep(wait)
+                continue
+            raise RuntimeError(f"timed out after {timeout}s")
+
 def process_item(ident: str) -> bool:
     if already_processed(ident):
         return True
@@ -80,12 +102,12 @@ def process_item(ident: str) -> bool:
         zip_path = tmp_dir / safe_zip
         zip_path.parent.mkdir(parents=True, exist_ok=True)
         url = f"https://archive.org/download/{ident}/{urllib.parse.quote(zip_name)}"
-        r = subprocess.run(
+        r = run_with_retry(
             ["curl", "-sSL", "-o", str(zip_path), url],
-            capture_output=True, text=True, timeout=300,
+            timeout=300, max_retries=3,
         )
-        if r.returncode != 0 or not zip_path.exists():
-            raise RuntimeError(f"download failed: {r.stderr.strip() or r.stdout.strip()[:100]}")
+        if not zip_path.exists():
+            raise RuntimeError("download failed, zip not found")
 
         # Extract
         extract_dir.mkdir(parents=True, exist_ok=True)
@@ -102,9 +124,7 @@ def process_item(ident: str) -> bool:
 
         # Upload individual files to same identifier (no metadata flags — just add files)
         cmd = ["ia", "upload", ident] + extracted
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-        if r.returncode != 0:
-            raise RuntimeError(f"upload failed: {(r.stderr.strip() or r.stdout.strip())[:200]}")
+        run_with_retry(cmd, timeout=600, max_retries=3)
 
         # Delete the zip from IA
         r = subprocess.run(
