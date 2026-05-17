@@ -10,7 +10,7 @@ Usage:
   python tdl_unzip_and_push.py --dry-run                  # preview only
 """
 
-import json, os, subprocess, sys, zipfile, shutil
+import json, os, subprocess, sys, zipfile, shutil, urllib.parse
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -76,9 +76,10 @@ def process_item(ident: str) -> bool:
 
     try:
         # Download zip
-        zip_path = tmp_dir / zip_name
+        safe_zip = zip_name.replace(" ", "_")
+        zip_path = tmp_dir / safe_zip
         zip_path.parent.mkdir(parents=True, exist_ok=True)
-        url = f"https://archive.org/download/{ident}/{zip_name}"
+        url = f"https://archive.org/download/{ident}/{urllib.parse.quote(zip_name)}"
         r = subprocess.run(
             ["curl", "-sSL", "-o", str(zip_path), url],
             capture_output=True, text=True, timeout=300,
