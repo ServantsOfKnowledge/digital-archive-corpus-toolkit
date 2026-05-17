@@ -1,140 +1,158 @@
 # Digital Archive Corpus Toolkit
 
-A comprehensive downloader, metadata scraper, and corpus builder for digital archival collections. Developed by **ServantsOfKnowledge** for digital archiving projects.
+A comprehensive downloader, uploader, and corpus builder for digital archival collections hosted on the Tamil Digital Library (TDL). Uploads to Internet Archive under the **TamilVirtualAcademy** collection.
 
-## Overview
+## Scripts
 
-This toolkit is designed for systematically downloading, indexing, and archiving large-scale digital collections. It handles the full pipeline — from crawling category listings and scraping bibliographic metadata to parallel file downloads and corpus index generation — producing Internet Archive-ready outputs suitable for research, preservation, and bulk analysis.
+### `tdl_downloader.py`
 
-Key architectural principles:
-- **Resumable by design** — every category tracks its own progress; interrupted downloads pick up where they left off
-- **Idempotent** — re-running produces identical directory structures via deterministic hashing
-- **Parallel by default** — configurable worker pool for concurrent downloads
-- **Category-isolated output** — each media type (Book, Document, Map, etc.) lands in its own directory for independent processing or offloading
-- **IA-ready metadata** — each downloaded item includes a `metadata.json` structured for Internet Archive upload
+Scrapes, downloads, and indexes digital archive content from TDL.
 
-## Script: `tdl_downloader.py`
-
-A Python script that scrapes, downloads, and indexes digital archive content.
-
-### Features
-
-- **Multi-category support**: Books, Periodicals, Palmleaf manuscripts, Documents, Audio, Video, Maps, Photographs, and more (18 categories)
-- **Automatic metadata extraction**: Title, author, publisher, year, language, subject, keywords, etc.
-- **Parallel downloading**: Configurable worker threads for concurrent downloads
-- **Resume support**: Skip already-downloaded items on re-run
-- **Progress tracking**: Persistent JSON progress file
-- **Corpus builder**: Generate consolidated JSON and CSV indexes
-- **IA-ready metadata**: Transforms metadata for Internet Archive upload format
-
-### Categories
-
-| ID | Name (Tamil) | Name (English) | Items |
-|----|-------------|----------------|-------|
-| 1 | ஒலி ஆவணம் | Audio | 125 |
-| 2 | காணொலி ஆவணம் | Video | 10 |
-| 3 | நில வரைபடம் | Map | 1,862 |
-| 4 | ஒளிப்படம் | Photograph | 53 |
-| 5 | ஆசிரியர் வாழ்க்கை குறிப்பு | Author Bio | 196 |
-| 6 | தொல் பழங்காலம் | Pre-historic | 166 |
-| 7 | அகழாய்வு | Excavation | 55 |
-| 8 | கல்வெட்டு | Inscription | 1,922 |
-| 9 | வழிபாட்டுத் தலம் | Religious Place | 370 |
-| 10 | சிற்பம் | Sculpture | 1,645 |
-| 11 | நாணயம் | Coin | 673 |
-| 12 | செப்பேடு | Copper Plate | 192 |
-| 13 | வரலாற்றுச் சின்னம் | Historical Monument | 124 |
-| 14 | ஓவியம் | Painting | 65 |
-| 20 | நூல் | Book | 42,043 |
-| 21 | இதழ் | Periodical | 29,951 |
-| 22 | சுவடி | Palmleaf | 5,387 |
-| 27 | ஆவணம் | Document | 4,769 |
-
-### Commands
-
-#### List articles in a category
+**Features:** Multi-category support (18 categories), automatic metadata extraction, parallel downloading with configurable workers, resume support via persistent progress tracking, corpus index generation (JSON/CSV), IA-ready metadata.
 
 ```bash
+# List articles in a category
 python tdl_downloader.py list --cat-id 20 --output listing.json
+
+# Download from a listing file
+python tdl_downloader.py download --input listing.json --dir tdl_corpus --workers 5
+
+# Fetch (list + download) all articles
+python tdl_downloader.py fetch --cat-id 20 --dir tdl_corpus --workers 5
+
+# Build corpus index
+python tdl_downloader.py corpus --dir tdl_corpus --csv
 ```
 
-#### Download articles
+### `tdl_upload.py`
+
+Uploads downloaded items to Internet Archive. Uploads individual files (PDF, cover.jpg, etc.) directly — **no zipping** — to allow IA derive to process content.
+
+**Features:**
+- Direct file upload (no zip) for better derive
+- `--cat` accepts multiple categories
+- `--corpus` to override corpus path (for external drives)
+- Atomic writes and retry logic for multi-process safety
+- Retry with exponential backoff on transient errors (timeout, connection, SlowDown)
+- Auto-detects already-on-IA items and skips them
+- Source folder deletion on successful upload
+- `language:tam` and `TamilVirtualAcademy` collection metadata
+- Transient error handling (SlowDown, timeout, connection errors)
 
 ```bash
-# From a listing file
-python tdl_downloader.py download --input listing.json --dir output_dir --workers 5
-
-# From a text file of URLs
-python tdl_downloader.py download --urls urls.txt --dir output_dir
-
-# Resume interrupted download
-python tdl_downloader.py download --input listing.json --dir output_dir --resume
-```
-
-#### Fetch (list + download) all articles in a category
-
-```bash
-python tdl_downloader.py fetch --cat-id 20 --dir tdl_output --workers 5
-```
-
-#### Build corpus index
-
-```bash
-python tdl_downloader.py corpus --dir tdl_verify --name tdl_corpus --csv
-```
-
-## Script: `tdl_upload.py`
-
-Uploads downloaded items to Internet Archive. Zips each item folder and submits with `tdl.{id}` identifiers.
-
-```bash
-# Preview what would be uploaded
+# Preview
 python tdl_upload.py --dry-run
 
-# Upload a specific category
-python tdl_upload.py --cat Book --workers 3
+# Upload specific categories
+python tdl_upload.py --cat Book Sculpture --workers 3
 
-# Upload everything across all categories
-python tdl_upload.py --workers 3
+# Upload from external drive
+python tdl_upload.py --cat Document --corpus "/Volumes/External/tdl_corpus" --workers 2
 
-# Retry previously failed uploads
+# Retry failed
 python tdl_upload.py --retry-failed
+
+# Skip collection permission check
+python tdl_upload.py --cat Book --workers 5 --no-collection-check
 ```
 
-Requires `ia` CLI: `pip install internetarchive && ia configure`
+Identifiers use the format `tdl.{article_id}-{transliterated_title}`, truncated to 80 chars max.
 
-## Script: `tdl_status.py`
+### `tdl_status.py`
 
-Shows live download progress across all categories with running process indicators.
+Live dashboard showing download + upload progress across all categories.
+
+```
+Category                DL /  Total     %     Size    Ul   Rem  Status
+──────────────────── ─────   ──────  ────  ───────  ────  ────  ────────────
+Book                 12016 /  42043   29%     909G     -     - ↑uploading
+...
+TOTAL                25277 /  89608   28%  FREE  135G  1680    49
+```
+
+- **DL:** items on disk (downloaded)
+- **Ul:** items uploaded to IA (per-category, from `upload_progress.json`)
+- **Rem:** items removed from disk after successful upload
+- Status indicators: `↓downloading`, `↑uploading`
+
+### `tdl_fix_metadata.py`
+
+Batch retrofits existing IA items with `TamilVirtualAcademy` collection + `language:tam` metadata. Uses `ia search` to find items, then applies metadata via `ia metadata --modify`.
 
 ```bash
-./tdl_status.py
+python tdl_fix_metadata.py
 ```
+
+### `tdl_unzip_and_push.py`
+
+For items uploaded via the old zip-based method: downloads the zip from IA, extracts the individual files, re-uploads them to the same identifier, then removes the zip. This triggers IA derive to process the actual content (PDFs, images) rather than treating a zip as opaque.
+
+```bash
+# Process all uploaded items
+python tdl_unzip_and_push.py --workers 3
+
+# Single item
+python tdl_unzip_and_push.py --ident tdl.12345-foo
+
+# Preview
+python tdl_unzip_and_push.py --dry-run
+
+# Reset progress
+python tdl_unzip_and_push.py --reset
+```
+
+Progress tracked in `unzip_done.json` (resumable).
+
+## Categories
+
+| ID | Category | Items |
+|----|----------|-------|
+| 1 | Audio | 125 |
+| 2 | Video | 10 |
+| 3 | Map | 1,862 |
+| 4 | Photograph | 53 |
+| 5 | Author Bio | 196 |
+| 6 | Pre-historic | 166 |
+| 7 | Excavation | 55 |
+| 8 | Inscription | 1,922 |
+| 9 | Religious Place | 370 |
+| 10 | Sculpture | 1,645 |
+| 11 | Coin | 673 |
+| 12 | Copper Plate | 192 |
+| 13 | Historical Monument | 124 |
+| 14 | Painting | 65 |
+| 20 | Book | 42,043 |
+| 21 | Periodical | 29,951 |
+| 22 | Palmleaf | 5,387 |
+| 27 | Document | 4,769 |
 
 ## Output Structure
 
 ```
-output_dir/
-├── {CategoryName}/
+tdl_corpus/
+├── {Category}/
 │   ├── {article_id}_{title}/
-│   │   ├── metadata.json      # IA-ready metadata
-│   │   ├── {pdf_filename}.pdf  # Document PDF
-│   │   └── cover.jpg           # Cover image (if available)
+│   │   ├── metadata.json        # IA-ready metadata
+│   │   ├── {pdf_filename}.pdf    # Document PDF
+│   │   └── cover.jpg             # Cover image
 │   └── ...
-├── listing_{category}.json     # Article URL listing
-├── progress.json               # Download progress tracker
-├── corpus_index.json           # Consolidated corpus index
-└── corpus_index.csv            # Corpus in CSV format
+├── progress.json                  # Download progress
+├── upload_progress.json           # Upload progress (per-category tracking)
+├── upload_failed.json             # Failed uploads
+├── unzip_done.json                # Unzip+push progress
+└── unzip_failed.json              # Unzip failures
 ```
 
 ## Requirements
 
 - Python 3.7+
-- `requests`
-- `beautifulsoup4`
-- `tqdm`
+- `requests`, `beautifulsoup4`, `tqdm`
+- `internetarchive` (for `ia` CLI): `pip install internetarchive && ia configure`
+- `unidecode` (for Tamil transliteration in identifiers)
 
-Install: `pip install requests beautifulsoup4 tqdm`
+```bash
+pip install requests beautifulsoup4 tqdm internetarchive unidecode
+```
 
 ## Corpus Fields (metadata.json)
 
@@ -161,4 +179,4 @@ Install: `pip install requests beautifulsoup4 tqdm`
 
 ---
 
-*Maintained by [ServantsOfKnowledge](https://github.com/servantsofknowledge). Part of the ServantsOfKnowledge digital archiving initiative.*
+*Maintained by [ServantsOfKnowledge](https://github.com/servantsofknowledge).*

@@ -25,6 +25,8 @@ venv/
 # Runtime state
 upload_progress.json
 upload_failed.json
+unzip_done.json
+unzip_failed.json
 
 # Secrets
 *.token

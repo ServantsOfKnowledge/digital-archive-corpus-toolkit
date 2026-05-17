@@ -22,7 +22,7 @@ except ImportError:
 
 CORPUS = Path(__file__).parent / "tdl_corpus"
 COLLECTION = "TamilVirtualAcademy"
-WORKERS = 3
+WORKERS = 5
 PROGRESS_FILE = Path(__file__).parent / "upload_progress.json"
 FAILED_FILE = Path(__file__).parent / "upload_failed.json"
 
@@ -44,7 +44,8 @@ def sanitize_identifier(s: str) -> str:
     s = re.sub(r'[^a-zA-Z0-9_-]', '-', s)
     s = re.sub(r'-+', '-', s)
     s = s.strip('-').strip('_').lower()
-    return s[:100]
+    # IA identifier max is 80 chars; 4 are reserved for "tdl." prefix
+    return s[:76]
 
 def make_identifier(cat: str, folder: Path) -> str:
     meta_file = folder / "metadata.json"
@@ -88,35 +89,61 @@ def make_identifier(cat: str, folder: Path) -> str:
 
 def load_progress() -> dict:
     if PROGRESS_FILE.exists():
+        for _ in range(3):
+            try:
+                return json.loads(PROGRESS_FILE.read_text())
+            except json.JSONDecodeError:
+                import time; time.sleep(0.5)
         return json.loads(PROGRESS_FILE.read_text())
-    return {"uploaded": [], "failed": []}
+    return {"uploaded": [], "uploaded_by_cat": {}, "failed": []}
 
 def save_progress(progress: dict):
-    PROGRESS_FILE.write_text(json.dumps(progress, indent=2))
+    tmp = PROGRESS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(progress, indent=2))
+    tmp.replace(PROGRESS_FILE)
 
 def log_failed(cat: str, folder: str, identifier: str, reason: str):
     failed = []
     if FAILED_FILE.exists():
-        failed = json.loads(FAILED_FILE.read_text())
+        for _ in range(3):
+            try:
+                failed = json.loads(FAILED_FILE.read_text())
+                break
+            except json.JSONDecodeError:
+                import time; time.sleep(0.5)
+        else:
+            try:
+                failed = json.loads(FAILED_FILE.read_text())
+            except json.JSONDecodeError:
+                failed = []
     failed.append({
         "category": cat, "folder": folder,
         "identifier": identifier, "reason": reason,
         "time": datetime.now().isoformat(),
     })
-    FAILED_FILE.write_text(json.dumps(failed, indent=2))
+    tmp = FAILED_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(failed, indent=2))
+    tmp.replace(FAILED_FILE)
 
 def already_on_ia(identifier: str) -> bool:
     r = subprocess.run(
         ["ia", "metadata", identifier],
         capture_output=True, text=True, timeout=30,
     )
-    return r.returncode == 0
+    if r.returncode != 0:
+        return False
+    try:
+        d = json.loads(r.stdout)
+        return bool(d) and "metadata" in d
+    except (json.JSONDecodeError, TypeError):
+        return False
 
 def prepare_metadata(meta: dict, category: str, fallback_collection=False) -> list:
     keep = {"title", "description", "subject", "creator", "publisher",
             "date", "language", "identifier", "pages", "edition", "volume",
             "collection", "mediatype", "source"}
     cleaned = {k: v for k, v in meta.items() if k in keep}
+    cleaned["language"] = "tam"
     cleaned["collection"] = "opensource" if fallback_collection else COLLECTION
     subjects = list(meta.get("subject", [])) if isinstance(meta.get("subject"), list) else []
     if not subjects and category:
@@ -133,58 +160,102 @@ def prepare_metadata(meta: dict, category: str, fallback_collection=False) -> li
             out.append(f"-m{k}:{v}")
     return out
 
-def make_zip(folder: Path) -> Path:
-    zip_name = folder.parent / f"{folder.name}.zip"
-    if zip_name.exists():
-        zip_name.unlink()
-    shutil.make_archive(str(zip_name.with_suffix('')), 'zip', folder)
-    return zip_name
+def run_with_retry(cmd: list, max_retries=3, timeout=1200) -> subprocess.CompletedProcess:
+    import time
+    for attempt in range(max_retries):
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if r.returncode == 0:
+            return r
+        err = (r.stderr.strip() or r.stdout.strip()).lower()
+        if "timeout" in err or "timed out" in err or "connection" in err or "slowdown" in err:
+            if attempt < max_retries - 1:
+                wait = 5 * (2 ** attempt)
+                print(f"  ! transient error, retrying in {wait}s...")
+                time.sleep(wait)
+                continue
+        return r
+    return r
 
 def upload_item(cat: str, folder: Path, no_collection_check=False) -> bool:
     identifier = make_identifier(cat, folder)
+
+    if not folder.exists():
+        return False
+
+    if already_on_ia(identifier):
+        print(f"  - {identifier}: already on IA")
+        shutil.rmtree(folder, ignore_errors=True)
+        return True
+
     meta_file = folder / "metadata.json"
     if not meta_file.exists():
         return False
     meta = json.loads(meta_file.read_text())
 
-    # Create zip of the entire folder
-    zip_path = make_zip(folder)
+    # Collect files to upload (exclude metadata.json)
+    files = sorted(f for f in folder.iterdir() if f.is_file() and f.name != "metadata.json")
+    if not files:
+        print(f"  ! {identifier}: no files to upload")
+        return False
+
+    meta_flags = prepare_metadata(meta, cat)
+    if no_collection_check:
+        meta_flags.append("--no-collection-check")
+    cmd = ["ia", "upload", identifier] + [str(f) for f in files] + meta_flags
+
     try:
-        meta_flags = prepare_metadata(meta, cat)
+        r = run_with_retry(cmd)
+    except FileNotFoundError:
+        raise RuntimeError("ia command not found (PATH issue?)")
+
+    if r.returncode == 0:
+        shutil.rmtree(folder, ignore_errors=True)
+        return True
+
+    err = r.stderr.strip() or r.stdout.strip()
+    if "Access Denied" in err:
+        print(f"  ! {identifier}: no access to {COLLECTION}, retrying with opensource")
+        meta_flags2 = prepare_metadata(meta, cat, fallback_collection=True)
         if no_collection_check:
-            meta_flags.append("--no-collection-check")
-        cmd = ["ia", "upload", identifier, str(zip_path)] + meta_flags
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-        if r.returncode == 0:
+            meta_flags2.append("--no-collection-check")
+        cmd2 = ["ia", "upload", identifier] + [str(f) for f in files] + meta_flags2
+        try:
+            r2 = run_with_retry(cmd2)
+        except FileNotFoundError:
+            raise RuntimeError("ia command not found (PATH issue?)")
+        if r2.returncode == 0:
+            shutil.rmtree(folder, ignore_errors=True)
             return True
+        raise RuntimeError(r2.stderr.strip() or r2.stdout.strip())
+    raise RuntimeError(err)
 
-        err = r.stderr.strip() or r.stdout.strip()
-        if "Access Denied" in err:
-            print(f"  ! {identifier}: no access to {COLLECTION}, retrying with opensource")
-            meta_flags2 = prepare_metadata(meta, cat, fallback_collection=True)
-            if no_collection_check:
-                meta_flags2.append("--no-collection-check")
-            cmd2 = ["ia", "upload", identifier, str(zip_path)] + meta_flags2
-            r2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=600)
-            if r2.returncode == 0:
-                return True
-            raise RuntimeError(r2.stderr.strip() or r2.stdout.strip())
-        raise RuntimeError(err)
-    finally:
-        if zip_path.exists():
-            zip_path.unlink()
-
-def scan_items(category_filter=None):
-    items = []
+def scan_items(category_filter=None, corpus_path=None):
+    if corpus_path is None:
+        corpus_path = CORPUS
+    if isinstance(category_filter, str):
+        category_filter = [category_filter]
+    selected = set(category_filter) if category_filter else None
+    per_cat = {}
     for cat in CATEGORIES:
-        if category_filter and cat != category_filter:
+        if selected and cat not in selected:
             continue
-        cat_dir = CORPUS / cat
+        cat_dir = corpus_path / cat
         if not cat_dir.exists():
             continue
+        folders = []
         for folder in sorted(cat_dir.iterdir()):
             if folder.is_dir() and (folder / "metadata.json").exists():
-                items.append((cat, folder))
+                folders.append((cat, folder))
+        if folders:
+            per_cat[cat] = folders
+    # Interleave round-robin so workers get mixed categories
+    items = []
+    while per_cat:
+        for cat in list(per_cat.keys()):
+            if per_cat[cat]:
+                items.append(per_cat[cat].pop(0))
+            if not per_cat[cat]:
+                del per_cat[cat]
     return items
 
 def dry_run(items):
@@ -200,11 +271,12 @@ def dry_run(items):
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Upload to Internet Archive")
-    parser.add_argument("--cat", help="Upload only this category")
+    parser.add_argument("--cat", nargs="+", help="Upload only these categories")
     parser.add_argument("--dry-run", action="store_true", help="Preview only")
     parser.add_argument("--retry-failed", action="store_true", help="Retry failed items")
     parser.add_argument("--workers", type=int, default=WORKERS, help="Parallel uploads")
     parser.add_argument("--no-collection-check", action="store_true", help="Skip collection permission check")
+    parser.add_argument("--corpus", help="Override corpus directory path")
     parser.add_argument("--delete", metavar="IDENTIFIER", help="Delete an item from IA")
     args = parser.parse_args()
 
@@ -213,15 +285,20 @@ def main():
         print(r.stdout.strip() or r.stderr.strip())
         return
 
+    if args.corpus:
+        corpus_path = Path(args.corpus)
+    else:
+        corpus_path = CORPUS
+
     progress = load_progress()
     uploaded_ids = set(progress.get("uploaded", []))
 
     if args.retry_failed and FAILED_FILE.exists():
         failed = json.loads(FAILED_FILE.read_text())
-        items = [(f["category"], CORPUS / f["category"] / f["folder"]) for f in failed]
+        items = [(f["category"], corpus_path / f["category"] / f["folder"]) for f in failed]
         FAILED_FILE.unlink()
     else:
-        items = scan_items(args.cat)
+        items = scan_items(args.cat, corpus_path)
 
     if not items:
         print("No items found to upload.")
@@ -250,20 +327,32 @@ def main():
                 fut.result()
                 uploaded_ids.add(ident)
                 progress["uploaded"] = list(uploaded_ids)
+                progress.setdefault("uploaded_by_cat", {})
+                progress["uploaded_by_cat"][cat] = progress["uploaded_by_cat"].get(cat, 0) + 1
                 save_progress(progress)
                 done += 1
                 print(f"  ✓ [{done}] {ident}")
             except subprocess.TimeoutExpired:
                 msg = "Timeout"
-                log_failed(cat, folder.name, ident, msg)
+                try:
+                    log_failed(cat, folder.name, ident, msg)
+                except Exception:
+                    pass
                 print(f"  ✗ [{done+skipped+1}] {ident}: {msg}")
             except RuntimeError as e:
                 msg = str(e)
-                log_failed(cat, folder.name, ident, msg)
+                try:
+                    log_failed(cat, folder.name, ident, msg)
+                except Exception:
+                    pass
                 print(f"  ✗ [{done+skipped+1}] {ident}: {msg}")
             except Exception as e:
-                msg = str(e)
-                log_failed(cat, folder.name, ident, msg)
+                import traceback
+                msg = f"{e}\n{traceback.format_exc()}"
+                try:
+                    log_failed(cat, folder.name, ident, msg)
+                except Exception:
+                    pass
                 print(f"  ✗ [{done+skipped+1}] {ident}: {msg}")
 
     print(f"\nDone: {done} uploaded, {skipped} skipped, {len(progress.get('failed',[]))} failed")
