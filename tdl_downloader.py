@@ -598,6 +598,42 @@ def save_progress(path: Path, state: dict):
 
 
 # ---------------------------------------------------------------------------
+# Scan for existing downloads to skip duplicates
+# ---------------------------------------------------------------------------
+
+def scan_existing_articles(path: str, cat_name: str = None) -> set:
+    """Scan a directory for already-downloaded article IDs.
+
+    Article folders follow the pattern ``{article_id}_{safe_title}/``
+    under ``path/cat_name/`` (or directly under ``path/`` subdirs if
+    *cat_name* is ``None``).
+    """
+    existing: set = set()
+    base = Path(path)
+    if not base.is_dir():
+        return existing
+
+    if cat_name:
+        dirs = [base / cat_name]
+    else:
+        dirs = [d for d in base.iterdir() if d.is_dir()]
+
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        for subdir in d.iterdir():
+            if subdir.is_dir():
+                # folder name is "12345_Safe Title"
+                art_id = subdir.name.split("_", 1)[0]
+                if art_id.isdigit():
+                    existing.add(art_id)
+
+    if existing:
+        log.info("Found %d existing articles in %s", len(existing), path)
+    return existing
+
+
+# ---------------------------------------------------------------------------
 # Load article URLs from various input formats
 # ---------------------------------------------------------------------------
 
@@ -659,7 +695,17 @@ def cmd_download(args):
     progress_file = output_dir / "progress.json"
     state = load_progress(progress_file)
     completed_ids = set(state.get("completed", []))
-    failed_urls = {f["url"] for f in state.get("failed", [])}
+    pending_ids = set(state.get("pending", []))
+
+    # Load externally-existing article IDs to skip duplicates
+    skip_path = getattr(args, 'skip_existing', None)
+    cat_name_hint = getattr(args, 'cat_name', None) or "downloads"
+    if skip_path:
+        external_ids = scan_existing_articles(skip_path, cat_name_hint)
+        completed_ids.update(external_ids)
+
+    # Build a map: url -> failed entry for quick lookup
+    failed_by_url = {f["url"]: f for f in state.get("failed", [])}
 
     articles = []
     if args.urls:
@@ -672,14 +718,21 @@ def cmd_download(args):
         sys.exit(1)
 
     log.info("Loaded %d article URLs", len(articles))
-    if args.resume:
-        log.info("Already completed: %d, failed: %d", len(completed_ids), len(failed_urls))
 
+    # Determine which URLs to process
+    retry_failed = getattr(args, 'retry', False)
     to_process = []
     for url in articles:
         art_id = parse_article_id(url)
-        if args.resume and (art_id in completed_ids or url in failed_urls):
-            continue
+        if art_id in completed_ids:
+            continue  # already succeeded, skip
+        if getattr(args, 'resume', False):
+            # retry failed items; skip only completed
+            pass
+        elif retry_failed:
+            # only process previously failed items
+            if url not in failed_by_url:
+                continue
         to_process.append(url)
 
     if not to_process:
@@ -688,6 +741,13 @@ def cmd_download(args):
 
     cat_name = getattr(args, 'cat_name', None) or "downloads"
     log.info("Downloading %d articles with %d workers into %s/", len(to_process), args.workers, cat_name)
+
+    # Mark pending
+    for url in to_process:
+        art_id = parse_article_id(url)
+        if art_id not in pending_ids and art_id not in completed_ids:
+            state.setdefault("pending", []).append(art_id)
+    save_progress(progress_file, state)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {executor.submit(process_article, url, output_dir, True, True, cat_name): url for url in to_process}
@@ -699,17 +759,30 @@ def cmd_download(args):
                     if result:
                         art_id = result.get("id", parse_article_id(url))
                         state["articles"][art_id] = result
+                        # Remove from pending
+                        if art_id in pending_ids:
+                            state["pending"].remove(art_id)
+                            pending_ids.discard(art_id)
                         if result.get("status") == "complete":
                             if art_id not in completed_ids:
                                 state["completed"].append(art_id)
                                 completed_ids.add(art_id)
+                            # Remove from failed list if it was a retry
+                            state["failed"] = [f for f in state["failed"] if f.get("url") != url and f.get("id") != art_id]
                         else:
+                            # Remove previous failed entry for this url if any, then re-append
+                            state["failed"] = [f for f in state["failed"] if f.get("url") != url]
                             state["failed"].append({"id": art_id, "url": url, "status": result.get("status")})
                         save_progress(progress_file, state)
                 except Exception as e:
                     art_id = parse_article_id(url)
                     log.error("Error: %s: %s", url, e)
+                    # Remove previous failed entry then re-append
+                    state["failed"] = [f for f in state["failed"] if f.get("url") != url]
                     state["failed"].append({"id": art_id, "url": url, "error": str(e)})
+                    if art_id in pending_ids:
+                        state["pending"].remove(art_id)
+                        pending_ids.discard(art_id)
                     save_progress(progress_file, state)
                 pbar.update(1)
 
@@ -794,32 +867,41 @@ def cmd_corpus(args):
 
 
 def cmd_fetch(args):
-    """List articles via AJAX, then download all."""
+    """List articles via AJAX, then download all.
+
+    On subsequent runs, reuses the saved listing unless --force is passed.
+    """
     cat_name = CATEGORY_NAMES.get(args.cat_id, f"cat_{args.cat_id}")
     output_dir = Path(args.dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     listing_file = output_dir / f"listing_{cat_name}.json"
 
-    log.info("Step 1: Listing articles for category %d...", args.cat_id)
-    articles = list_articles(
-        cat_id=args.cat_id,
-        sub_cat_id=args.sub_cat_id or "",
-        inner_cat_id=args.inner_cat_id or "",
-        max_pages=args.max_pages,
-        items_per_page=24,
-    )
-
-    listing = {
-        "source_cat_id": args.cat_id,
-        "sub_cat_id": args.sub_cat_id or "",
-        "inner_cat_id": args.inner_cat_id or "",
-        "total": len(articles),
-        "articles": articles,
-        "timestamp": datetime.utcnow().isoformat(),
-    }
-    with open(listing_file, "w") as f:
-        json.dump(listing, f, ensure_ascii=False, indent=2)
-    log.info("Found %d articles, saved to %s", len(articles), listing_file)
+    # Reuse existing listing unless --force
+    if listing_file.exists() and not args.force:
+        log.info("Using existing listing: %s (use --force to re-list from source)", listing_file)
+        with open(listing_file) as f:
+            listing = json.load(f)
+        articles = listing.get("articles", [])
+    else:
+        log.info("Step 1: Listing articles for category %d...", args.cat_id)
+        articles = list_articles(
+            cat_id=args.cat_id,
+            sub_cat_id=args.sub_cat_id or "",
+            inner_cat_id=args.inner_cat_id or "",
+            max_pages=args.max_pages,
+            items_per_page=24,
+        )
+        listing = {
+            "source_cat_id": args.cat_id,
+            "sub_cat_id": args.sub_cat_id or "",
+            "inner_cat_id": args.inner_cat_id or "",
+            "total": len(articles),
+            "articles": articles,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+        with open(listing_file, "w") as f:
+            json.dump(listing, f, ensure_ascii=False, indent=2)
+        log.info("Found %d articles, saved to %s", len(articles), listing_file)
 
     if not articles:
         log.warning("No articles found!")
@@ -829,6 +911,9 @@ def cmd_fetch(args):
     args.input = str(listing_file)
     args.urls = None
     args.cat_name = cat_name
+    # Carry retry flag
+    if not hasattr(args, 'retry'):
+        args.retry = False
     cmd_download(args)
 
 
@@ -856,7 +941,9 @@ def main():
     p_down.add_argument("--input", help="JSON listing from 'list' command")
     p_down.add_argument("--dir", default="tdl_output", help="Output directory")
     p_down.add_argument("--workers", type=int, default=5, help="Parallel downloads")
-    p_down.add_argument("--resume", action="store_true", help="Resume interrupted download")
+    p_down.add_argument("--resume", action="store_true", help="Resume interrupted download (skips completed, retries failed)")
+    p_down.add_argument("--retry", action="store_true", help="Only retry previously failed items")
+    p_down.add_argument("--skip-existing", help="Skip article IDs already present in this directory (e.g. /Volumes/BMShri Back/tdl_corpus)")
     p_down.add_argument("--cat-name", default="downloads", help="Category subdirectory name")
 
     p_fetch = sub.add_parser("fetch", help="List articles by category and download them all")
@@ -866,7 +953,10 @@ def main():
     p_fetch.add_argument("--dir", default="tdl_output", help="Output directory")
     p_fetch.add_argument("--workers", type=int, default=5, help="Parallel downloads")
     p_fetch.add_argument("--max-pages", type=int, help="Max search pages to list")
-    p_fetch.add_argument("--resume", action="store_true", help="Resume download")
+    p_fetch.add_argument("--resume", action="store_true", help="Resume download (skips completed, retries failed)")
+    p_fetch.add_argument("--force", action="store_true", help="Re-list articles from source even if listing exists")
+    p_fetch.add_argument("--retry", action="store_true", help="Only retry previously failed items")
+    p_fetch.add_argument("--skip-existing", help="Skip article IDs already present in this directory (e.g. /Volumes/BMShri Back/tdl_corpus)")
 
     p_corpus = sub.add_parser("corpus", help="Build consolidated corpus index from downloads")
     p_corpus.add_argument("--dir", default="tdl_output", help="Output directory with downloads/")

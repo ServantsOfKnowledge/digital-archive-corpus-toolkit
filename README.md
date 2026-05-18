@@ -56,7 +56,29 @@ python tdl_upload.py --retry-failed
 python tdl_upload.py --cat Book --workers 5 --no-collection-check
 ```
 
-Identifiers use the format `tdl.{article_id}-{transliterated_title}`, truncated to 80 chars max.
+Identifiers use the format `tdl.{article_id}-{transliterated_title}`, truncated to 80 chars max. Includes `original_url` metadata pointing back to the source TDL article page. See `docs/scripts.md` for full flag documentation.
+
+### `tdl_backfill_url.py`
+
+Backfills `original_url` metadata on already-uploaded IA items. Extracts numeric article IDs from uploaded identifiers and adds the TDL source URL.
+
+```bash
+# Preview
+python tdl_backfill_url.py --dry-run
+
+# Run with 8 parallel workers
+python tdl_backfill_url.py --workers 8
+```
+
+### `tdl_dashboard.py`
+
+Web dashboard for monitoring all operations — process status, category progress, start/stop/restart controls.
+
+```bash
+python tdl_dashboard.py --port 8080
+```
+
+Access at http://localhost:8080.
 
 ### `tdl_status.py`
 

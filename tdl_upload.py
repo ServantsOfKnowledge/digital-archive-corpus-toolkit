@@ -87,6 +87,31 @@ def make_identifier(cat: str, folder: Path) -> str:
         slug = f"{base}-{h}"
     return f"{PREFIX}{slug}"
 
+
+def shorten_filename(path: Path) -> Path:
+    """Rename a file if its UTF-8 byte-length exceeds IA's 230-byte S3 limit."""
+    MAX_COMPONENT_BYTES = 230
+    raw = path.name.encode("utf-8")
+    if len(raw) <= MAX_COMPONENT_BYTES:
+        return path
+
+    stem = path.stem
+    ext = path.suffix
+    max_stem = MAX_COMPONENT_BYTES - len(ext.encode("utf-8")) - 1
+    if max_stem < 16:
+        new_stem = hashlib.md5(stem.encode()).hexdigest()[:16]
+    else:
+        stem_bytes = stem.encode("utf-8")
+        while len(stem_bytes) > max_stem:
+            stem = stem[:-1]
+            stem_bytes = stem.encode("utf-8")
+        new_stem = stem
+
+    new_path = path.with_name(new_stem + ext)
+    path.rename(new_path)
+    return new_path
+
+
 def load_progress() -> dict:
     if PROGRESS_FILE.exists():
         for _ in range(3):
@@ -126,22 +151,30 @@ def log_failed(cat: str, folder: str, identifier: str, reason: str):
     tmp.replace(FAILED_FILE)
 
 def already_on_ia(identifier: str) -> bool:
-    r = subprocess.run(
-        ["ia", "metadata", identifier],
-        capture_output=True, text=True, timeout=30,
-    )
-    if r.returncode != 0:
-        return False
-    try:
-        d = json.loads(r.stdout)
-        return bool(d) and "metadata" in d
-    except (json.JSONDecodeError, TypeError):
-        return False
+    for attempt in range(3):
+        try:
+            r = subprocess.run(
+                ["ia", "metadata", identifier],
+                capture_output=True, text=True, timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            if attempt < 2:
+                time.sleep(2)
+                continue
+            return False
+        if r.returncode != 0:
+            return False
+        try:
+            d = json.loads(r.stdout)
+            return bool(d) and "metadata" in d
+        except (json.JSONDecodeError, TypeError):
+            return False
+    return False
 
 def prepare_metadata(meta: dict, category: str, fallback_collection=False) -> list:
     keep = {"title", "description", "subject", "creator", "publisher",
             "date", "language", "identifier", "pages", "edition", "volume",
-            "collection", "mediatype", "source"}
+            "collection", "mediatype", "source", "original_url"}
     cleaned = {k: v for k, v in meta.items() if k in keep}
     cleaned["language"] = "tam"
     cleaned["collection"] = "opensource" if fallback_collection else COLLECTION
@@ -177,57 +210,90 @@ def run_with_retry(cmd: list, max_retries=3, timeout=1200) -> subprocess.Complet
     return r
 
 def upload_item(cat: str, folder: Path, no_collection_check=False) -> bool:
-    identifier = make_identifier(cat, folder)
+    base_identifier = make_identifier(cat, folder)
 
     if not folder.exists():
         return False
-
-    if already_on_ia(identifier):
-        print(f"  - {identifier}: already on IA")
-        shutil.rmtree(folder, ignore_errors=True)
-        return True
 
     meta_file = folder / "metadata.json"
     if not meta_file.exists():
         return False
     meta = json.loads(meta_file.read_text())
 
-    # Collect files to upload (exclude metadata.json)
     files = sorted(f for f in folder.iterdir() if f.is_file() and f.name != "metadata.json")
+    # Ensure filenames fit IA's 230-byte S3 key component limit
+    files = [shorten_filename(f) for f in files]
+    # Re-check files exist (may have been deleted between scan and now)
+    existing = [f for f in files if f.exists()]
+    for f in files:
+        if not f.exists():
+            print(f"  ! {base_identifier}: file vanished, skipping: {f.name}")
+    files = existing
     if not files:
-        print(f"  ! {identifier}: no files to upload")
+        print(f"  ! {base_identifier}: no files to upload")
         return False
 
-    meta_flags = prepare_metadata(meta, cat)
-    if no_collection_check:
-        meta_flags.append("--no-collection-check")
-    cmd = ["ia", "upload", identifier] + [str(f) for f in files] + meta_flags
+    # Try identifier with dedup suffixes on bucket collision.
+    # For each candidate: if it already exists on IA it's either our item
+    # (suffix == "") or a collision with another item (suffix != "").
+    for suffix in ("", "-001", "-002", "-003"):
+        identifier = base_identifier + suffix
+        exists = already_on_ia(identifier)
 
-    try:
-        r = run_with_retry(cmd)
-    except FileNotFoundError:
-        raise RuntimeError("ia command not found (PATH issue?)")
-
-    if r.returncode == 0:
-        shutil.rmtree(folder, ignore_errors=True)
-        return True
-
-    err = r.stderr.strip() or r.stdout.strip()
-    if "Access Denied" in err:
-        print(f"  ! {identifier}: no access to {COLLECTION}, retrying with opensource")
-        meta_flags2 = prepare_metadata(meta, cat, fallback_collection=True)
-        if no_collection_check:
-            meta_flags2.append("--no-collection-check")
-        cmd2 = ["ia", "upload", identifier] + [str(f) for f in files] + meta_flags2
-        try:
-            r2 = run_with_retry(cmd2)
-        except FileNotFoundError:
-            raise RuntimeError("ia command not found (PATH issue?)")
-        if r2.returncode == 0:
+        if exists and not suffix:
+            # Original identifier — our item is already uploaded
+            print(f"  - {identifier}: already on IA")
             shutil.rmtree(folder, ignore_errors=True)
             return True
-        raise RuntimeError(r2.stderr.strip() or r2.stdout.strip())
-    raise RuntimeError(err)
+
+        if exists and suffix:
+            # Suffix is taken by a different item — try next suffix
+            continue
+
+        meta_flags = prepare_metadata(meta, cat)
+        if no_collection_check:
+            meta_flags.append("--no-collection-check")
+        cmd = ["ia", "upload", identifier] + [str(f) for f in files] + meta_flags
+
+        try:
+            r = run_with_retry(cmd)
+        except FileNotFoundError:
+            raise RuntimeError("ia command not found (PATH issue?)")
+
+        if r.returncode == 0:
+            shutil.rmtree(folder, ignore_errors=True)
+            return True
+
+        err = r.stderr.strip() or r.stdout.strip()
+
+        # Bucket collision — try next suffix
+        if "bucket" in err.lower() and "not available" in err.lower():
+            print(f"  ! {identifier}: bucket collision, trying -001 suffix")
+            continue
+
+        # File vanished between scan and upload — skip
+        if "not a valid file" in err.lower() or "usage:" in err.lower():
+            print(f"  ! {identifier}: file not found, skipping")
+            return False
+
+        if "Access Denied" in err:
+            print(f"  ! {identifier}: no access to {COLLECTION}, retrying with opensource")
+            meta_flags2 = prepare_metadata(meta, cat, fallback_collection=True)
+            if no_collection_check:
+                meta_flags2.append("--no-collection-check")
+            cmd2 = ["ia", "upload", identifier] + [str(f) for f in files] + meta_flags2
+            try:
+                r2 = run_with_retry(cmd2)
+            except FileNotFoundError:
+                raise RuntimeError("ia command not found (PATH issue?)")
+            if r2.returncode == 0:
+                shutil.rmtree(folder, ignore_errors=True)
+                return True
+            raise RuntimeError(r2.stderr.strip() or r2.stdout.strip())
+
+        raise RuntimeError(err)
+
+    raise RuntimeError(f"All identifier suffixes exhausted for {base_identifier}")
 
 def scan_items(category_filter=None, corpus_path=None):
     if corpus_path is None:
@@ -247,6 +313,9 @@ def scan_items(category_filter=None, corpus_path=None):
             if folder.is_dir() and (folder / "metadata.json").exists():
                 folders.append((cat, folder))
         if folders:
+            # Books: oldest first so they get uploaded before newer ones
+            if cat == "Book":
+                folders.sort(key=lambda x: x[1].stat().st_mtime)
             per_cat[cat] = folders
     # Interleave round-robin so workers get mixed categories
     items = []

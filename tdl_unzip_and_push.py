@@ -161,6 +161,7 @@ def main():
     parser.add_argument("--workers", type=int, default=WORKERS)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--reset", action="store_true", help="Reset done list")
+    parser.add_argument("--retry", action="store_true", help="Retry failed items from unzip_failed.json")
     args = parser.parse_args()
 
     if args.reset and DONE_FILE.exists():
@@ -169,6 +170,13 @@ def main():
 
     if args.ident:
         items = [args.ident]
+    elif args.retry:
+        if not FAILED_FILE.exists():
+            print("No failed items to retry")
+            return
+        failed = json.loads(FAILED_FILE.read_text())
+        items = list({f["identifier"] for f in failed})
+        print(f"Retrying {len(items)} failed items")
     else:
         items = get_uploaded_items(args.cat)
 
