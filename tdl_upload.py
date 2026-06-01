@@ -49,7 +49,10 @@ def sanitize_identifier(s: str) -> str:
 
 def make_identifier(cat: str, folder: Path) -> str:
     meta_file = folder / "metadata.json"
-    meta = json.loads(meta_file.read_text()) if meta_file.exists() else {}
+    try:
+        meta = json.loads(meta_file.read_text()) if meta_file.exists() else {}
+    except (json.JSONDecodeError, ValueError):
+        return None
     art_id = meta.get("identifier", "")
     title = meta.get("title", folder.name)
 
@@ -295,7 +298,11 @@ def upload_item(cat: str, folder: Path, no_collection_check=False) -> bool:
 
     raise RuntimeError(f"All identifier suffixes exhausted for {base_identifier}")
 
-def scan_items(category_filter=None, corpus_path=None):
+def folder_size_mb(folder: Path) -> float:
+    return sum(f.stat().st_size for f in folder.iterdir() if f.is_file()) / (1024 * 1024)
+
+
+def scan_items(category_filter=None, corpus_path=None, max_size_mb=None):
     if corpus_path is None:
         corpus_path = CORPUS
     if isinstance(category_filter, str):
@@ -311,6 +318,8 @@ def scan_items(category_filter=None, corpus_path=None):
         folders = []
         for folder in sorted(cat_dir.iterdir()):
             if folder.is_dir() and (folder / "metadata.json").exists():
+                if max_size_mb is not None and folder_size_mb(folder) > max_size_mb:
+                    continue
                 folders.append((cat, folder))
         if folders:
             # Books: oldest first so they get uploaded before newer ones
@@ -347,6 +356,7 @@ def main():
     parser.add_argument("--no-collection-check", action="store_true", help="Skip collection permission check")
     parser.add_argument("--corpus", help="Override corpus directory path")
     parser.add_argument("--delete", metavar="IDENTIFIER", help="Delete an item from IA")
+    parser.add_argument("--max-size-mb", type=float, help="Only upload folders at or below this size")
     args = parser.parse_args()
 
     if args.delete:
@@ -367,7 +377,7 @@ def main():
         items = [(f["category"], corpus_path / f["category"] / f["folder"]) for f in failed]
         FAILED_FILE.unlink()
     else:
-        items = scan_items(args.cat, corpus_path)
+        items = scan_items(args.cat, corpus_path, args.max_size_mb)
 
     if not items:
         print("No items found to upload.")
@@ -385,6 +395,9 @@ def main():
         futures = {}
         for cat, folder in items:
             ident = make_identifier(cat, folder)
+            if ident is None:
+                skipped += 1
+                continue
             if ident in uploaded_ids:
                 skipped += 1
                 continue

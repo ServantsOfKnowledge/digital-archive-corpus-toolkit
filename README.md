@@ -58,6 +58,20 @@ python3 tdl_pdf_recovery.py --log-file logs/books_upload.log --retry
 
 Use this when upload logs contain `Uploaded content is unacceptable. - error checking pdf file`.
 
+### `tdl_server_resume.py`
+
+Prepares a fresh server checkout to pick up upload/download work without copying downloaded corpus files. The handoff package contains code, source listings, and upload state; the server redownloads content from TDL and resumes uploads from `upload_progress.json`.
+
+```bash
+tar -xzf tmvu-corpus-server-handoff.tar.gz
+cd tmvu-corpus-server-handoff
+python3 tdl_server_resume.py --restore-state
+python3 tdl_server_resume.py --download --cat Book Periodical --workers 3
+python3 tdl_server_resume.py --start-uploads --cat Book Periodical --workers 3 --max-size-mb 100
+```
+
+See `docs/server-handoff.md` for the full server setup and monitoring workflow.
+
 ```bash
 # Preview
 python tdl_upload.py --dry-run
@@ -220,6 +234,12 @@ logs/
 ├── batch.log                      # Batch runner output
 ├── batch_download.log             # Batch download progress
 └── batch_error_*.log              # Per-category error logs
+
+server_state/                      # Packaged handoff state for server resumes
+├── upload_progress.json           # Uploaded IDs to skip on IA
+├── upload_failed.json             # Failed uploads, if present
+├── pdf_redownload.json            # PDF recovery queue, if present
+└── listing_*.json                 # Source listings for redownload
 ```
 
 ## Requirements

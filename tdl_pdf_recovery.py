@@ -157,7 +157,6 @@ def redownload_items():
         "--urls", str(url_file),
         "--dir", "tdl_redownload_temp",
         "--workers", "3",
-        "--skip-existing", "tdl_corpus",
         "--cat-name", "recovered"
     ]
 

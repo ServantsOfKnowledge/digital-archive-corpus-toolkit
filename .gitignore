@@ -2,6 +2,7 @@
 tdl_corpus/
 tdl_verify/
 *.log
+*.tar.gz
 
 # OS files
 .DS_Store
