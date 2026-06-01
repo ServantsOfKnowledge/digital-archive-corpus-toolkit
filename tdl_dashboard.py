@@ -18,6 +18,7 @@ import flask
 HERE = Path(__file__).parent
 CORPUS = HERE / "tdl_corpus"
 EXTERNAL = Path("/Volumes/BMShri Back/tdl_corpus")
+LOGS_DIR = HERE / "logs"
 
 # ── Category definitions: (sort_id, name, total_expected, source) ──
 # source: "local" = CORPUS, "external" = EXTERNAL
@@ -79,7 +80,7 @@ PROCESSES = {
             "--dir", str(HERE / "tdl_corpus"),
             "--workers", "3", "--resume",
         ],
-        "log": HERE / "books.log",
+        "log": LOGS_DIR / "books.log",
         "match": r"tdl_downloader.*cat-id 20",
     },
     "download_periodical": {
@@ -93,7 +94,7 @@ PROCESSES = {
             "--workers", "3", "--resume",
             "--skip-existing", "/Volumes/BMShri Back/tdl_corpus",
         ],
-        "log": HERE / "periodical.log",
+        "log": LOGS_DIR / "periodical.log",
         "match": r"tdl_downloader.*cat-id 21",
     },
     "upload_book": {
@@ -104,7 +105,7 @@ PROCESSES = {
             "python3", "-u", str(HERE / "tdl_upload.py"),
             "--cat", "Book", "--workers", "3", "--no-collection-check",
         ],
-        "log": HERE / "books_upload.log",
+        "log": LOGS_DIR / "books_upload.log",
         "match": r"tdl_upload.*--cat Book",
     },
     "upload_bigcats": {
@@ -116,7 +117,7 @@ PROCESSES = {
             "--cat", "Sculpture", "Palmleaf", "Map", "Inscription",
             "--workers", "5", "--no-collection-check",
         ],
-        "log": HERE / "big_cats_upload.log",
+        "log": LOGS_DIR / "big_cats_upload.log",
         "match": r"tdl_upload.*Sculpture.*Palmleaf",
     },
     "upload_periodical_ext": {
@@ -129,7 +130,7 @@ PROCESSES = {
             "--corpus", "/Volumes/BMShri Back/tdl_corpus",
             "--workers", "2", "--no-collection-check",
         ],
-        "log": HERE / "periodical_upload.log",
+        "log": LOGS_DIR / "periodical_upload.log",
         "match": r"tdl_upload.*Periodical.*BMShri",
     },
     "unzip_push": {
@@ -144,7 +145,7 @@ PROCESSES = {
             "python3", "-u", str(HERE / "tdl_unzip_and_push.py"),
             "--retry", "--workers", "2",
         ],
-        "log": HERE / "unzip_push.log",
+        "log": LOGS_DIR / "unzip_push.log",
         "match": r"tdl_unzip_and_push",
     },
 }

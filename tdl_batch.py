@@ -3,7 +3,7 @@
 Batch runner: downloads ALL categories from a digital archive via tdl_downloader.py.
 Processes smallest categories first (by item count) to maximize coverage.
 
-Run: nohup python3 tdl_batch.py > batch.log 2>&1 &
+Run: nohup python3 tdl_batch.py > logs/batch.log 2>&1 &
 """
 import subprocess, sys, time, os, shutil
 from datetime import datetime
@@ -11,7 +11,8 @@ from pathlib import Path
 
 OUTPUT_DIR = "tdl_corpus"
 WORKERS = 5
-LOG_FILE = "batch_download.log"
+LOGS_DIR = Path("logs")
+LOG_FILE = LOGS_DIR / "batch_download.log"
 MIN_FREE_GB = 10  # Stop if less than 10GB free
 
 # Categories sorted by item count (ascending) — smallest first
@@ -39,6 +40,7 @@ CATEGORIES = [
 def log(msg):
     line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
     print(line, flush=True)
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
     with open(LOG_FILE, "a") as f:
         f.write(line + "\n")
 
@@ -59,7 +61,8 @@ def run(cmd, cat_name):
         log(f"Completed {cat_name} in {elapsed:.0f}s")
     else:
         log(f"FAILED {cat_name} (rc={result.returncode}) in {elapsed:.0f}s")
-        with open(f"batch_error_{cat_name}.log", "w") as f:
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        with open(LOGS_DIR / f"batch_error_{cat_name}.log", "w") as f:
             f.write(out)
     return result.returncode
 

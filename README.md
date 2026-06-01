@@ -24,6 +24,14 @@ python tdl_downloader.py fetch --cat-id 20 --dir tdl_corpus --workers 5
 python tdl_downloader.py corpus --dir tdl_corpus --csv
 ```
 
+**Download Resume & Skip Logic:**
+- **Progress tracking:** Maintains `progress.json` with `completed`, `pending`, `failed` article IDs
+- **Resume mode** (`--resume`): Skips completed items, retries failed items
+- **Skip existing** (`--skip-existing PATH`): Scans an external directory for article IDs and marks them as completed (avoids re-downloading duplicates)
+- **Partial downloads:** Supports HTTP range requests to resume interrupted file transfers
+- **Retry behavior:** Automatically retries transient errors (timeout, connection reset) with exponential backoff
+- **No deletion:** Downloaded items remain on disk unless manually deleted after successful upload
+
 ### `tdl_upload.py`
 
 Uploads downloaded items to Internet Archive. Uploads individual files (PDF, cover.jpg, etc.) directly — **no zipping** — to allow IA derive to process content.
@@ -35,9 +43,20 @@ Uploads downloaded items to Internet Archive. Uploads individual files (PDF, cov
 - Atomic writes and retry logic for multi-process safety
 - Retry with exponential backoff on transient errors (timeout, connection, SlowDown)
 - Auto-detects already-on-IA items and skips them
-- Source folder deletion on successful upload
+- **Source folder deletion on successful upload** (files are removed from disk after successful upload)
 - `language:tam` and `TamilVirtualAcademy` collection metadata
 - Transient error handling (SlowDown, timeout, connection errors)
+
+### `tdl_pdf_recovery.py`
+
+Detects Internet Archive PDF validation failures, redownloads affected TDL items, and retries upload.
+
+```bash
+python3 tdl_pdf_recovery.py --log-file logs/books_upload.log
+python3 tdl_pdf_recovery.py --log-file logs/books_upload.log --retry
+```
+
+Use this when upload logs contain `Uploaded content is unacceptable. - error checking pdf file`.
 
 ```bash
 # Preview
@@ -148,6 +167,33 @@ Progress tracked in `unzip_done.json` (resumable).
 | 22 | Palmleaf | 5,387 |
 | 27 | Document | 4,769 |
 
+## Script Status & Workflow
+
+### Download Workflow
+1. **Fetch listing** (`list` or `fetch`): Queries TDL API for articles in a category
+2. **Download with resume**: Tracks progress in `progress.json`
+   - Completed items are skipped automatically
+   - Failed items can be retried with `--resume` flag
+   - Supports `--skip-existing PATH` to avoid re-downloading duplicates from external drives
+3. **Metadata extraction**: Scrapes metadata for each article into `metadata.json`
+4. **Corpus indexing** (`corpus`): Generates JSON/CSV indexes of downloaded items
+
+### Upload Workflow
+1. **Scan categories**: Finds all folders with `metadata.json`
+2. **Check IA**: Verifies if item already exists on Internet Archive
+3. **Upload files**: Uploads PDF, cover, and metadata to IA
+4. **Track progress**: Records uploaded items in `upload_progress.json`
+5. **Clean up**: Automatically deletes source folders after successful upload
+6. **Retry failed**: Failed uploads are logged in `upload_failed.json` for later retry
+
+### Key Characteristics
+- **Downloads are deleted after successful upload** to manage local disk space
+- **Resume support**: All operations support resume via progress JSON files and HTTP range requests
+- **Parallel processing**: All operations support configurable worker threads
+- **Error recovery**: Transient errors are automatically retried with exponential backoff
+- **Deduplication**: `--skip-existing` flag prevents re-downloading items from other drives
+- **Atomic operations**: Multi-threaded uploads use atomic file writes to prevent corruption
+
 ## Output Structure
 
 ```
@@ -163,6 +209,17 @@ tdl_corpus/
 ├── upload_failed.json             # Failed uploads
 ├── unzip_done.json                # Unzip+push progress
 └── unzip_failed.json              # Unzip failures
+
+logs/
+├── books.log                      # Download logs
+├── books_upload.log               # Upload logs
+├── periodical.log
+├── periodical_upload.log
+├── big_cats_upload.log
+├── unzip_push.log
+├── batch.log                      # Batch runner output
+├── batch_download.log             # Batch download progress
+└── batch_error_*.log              # Per-category error logs
 ```
 
 ## Requirements
