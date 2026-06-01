@@ -33,11 +33,13 @@ Redownload Book and Periodical items from TDL:
 python3 tdl_server_resume.py --download --cat Book Periodical --workers 3
 ```
 
-Start uploads for folders at or below 100 MB:
+Start uploads:
 
 ```bash
-python3 tdl_server_resume.py --start-uploads --cat Book Periodical --workers 3 --max-size-mb 100
+python3 tdl_server_resume.py --start-uploads --cat Book Periodical --workers 3
 ```
+
+To intentionally limit uploads by local folder size, add `--max-size-mb 100`.
 
 Monitor:
 

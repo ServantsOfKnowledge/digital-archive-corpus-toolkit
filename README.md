@@ -67,7 +67,7 @@ tar -xzf tmvu-corpus-server-handoff.tar.gz
 cd tmvu-corpus-server-handoff
 python3 tdl_server_resume.py --restore-state
 python3 tdl_server_resume.py --download --cat Book Periodical --workers 3
-python3 tdl_server_resume.py --start-uploads --cat Book Periodical --workers 3 --max-size-mb 100
+python3 tdl_server_resume.py --start-uploads --cat Book Periodical --workers 3
 ```
 
 See `docs/server-handoff.md` for the full server setup and monitoring workflow.

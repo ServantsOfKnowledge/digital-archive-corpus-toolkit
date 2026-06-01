@@ -78,7 +78,8 @@ def main():
     parser.add_argument("--state-dir", default="server_state", help="Directory containing upload state and listing files")
     parser.add_argument("--cat", nargs="+", default=["Book", "Periodical"], help="Categories to process")
     parser.add_argument("--workers", type=int, default=3)
-    parser.add_argument("--max-size-mb", type=float, default=100)
+    parser.add_argument("--max-size-mb", type=float, default=None,
+                        help="Optional upload size cap; omitted means upload all downloaded items")
     parser.add_argument("--restore-state", action="store_true")
     parser.add_argument("--download", action="store_true")
     parser.add_argument("--start-uploads", action="store_true")

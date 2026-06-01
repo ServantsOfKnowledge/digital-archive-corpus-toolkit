@@ -357,6 +357,8 @@ def main():
     parser.add_argument("--corpus", help="Override corpus directory path")
     parser.add_argument("--delete", metavar="IDENTIFIER", help="Delete an item from IA")
     parser.add_argument("--max-size-mb", type=float, help="Only upload folders at or below this size")
+    parser.add_argument("--cleanup-uploaded-local", action="store_true",
+                        help="Delete local folders already recorded as uploaded in upload_progress.json")
     args = parser.parse_args()
 
     if args.delete:
@@ -399,6 +401,9 @@ def main():
                 skipped += 1
                 continue
             if ident in uploaded_ids:
+                if args.cleanup_uploaded_local:
+                    shutil.rmtree(folder, ignore_errors=True)
+                    print(f"  - {ident}: already uploaded, removed local folder")
                 skipped += 1
                 continue
             futures[pool.submit(upload_item, cat, folder, args.no_collection_check)] = (cat, folder, ident)
