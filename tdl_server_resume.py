@@ -51,6 +51,7 @@ def download_categories(categories, workers):
             "--cat-name", cat,
             "--workers", str(workers),
             "--resume",
+            "--upload-immediately",
         ])
 
 
@@ -90,6 +91,8 @@ def main():
     if args.download:
         download_categories(args.cat, args.workers)
     if args.start_uploads:
+        # After immediate uploads from downloader, run a fresh pass to catch any items
+        # that failed during the download+upload pipeline (e.g. transient errors)
         start_uploads(args.cat, args.workers, args.max_size_mb)
     if not (args.restore_state or args.download or args.start_uploads):
         parser.print_help()

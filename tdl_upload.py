@@ -309,6 +309,7 @@ def scan_items(category_filter=None, corpus_path=None, max_size_mb=None):
         category_filter = [category_filter]
     selected = set(category_filter) if category_filter else None
     per_cat = {}
+    total_skipped_ia = 0
     for cat in CATEGORIES:
         if selected and cat not in selected:
             continue
@@ -320,6 +321,14 @@ def scan_items(category_filter=None, corpus_path=None, max_size_mb=None):
             if folder.is_dir() and (folder / "metadata.json").exists():
                 if max_size_mb is not None and folder_size_mb(folder) > max_size_mb:
                     continue
+                # Skip if already on IA - avoid excessive API calls during bulk scan
+                try:
+                    ident = make_identifier(cat, folder)
+                    if ident and already_on_ia(ident):
+                        total_skipped_ia += 1
+                        continue
+                except Exception:
+                    pass
                 folders.append((cat, folder))
         if folders:
             # Books: oldest first so they get uploaded before newer ones
@@ -334,7 +343,60 @@ def scan_items(category_filter=None, corpus_path=None, max_size_mb=None):
                 items.append(per_cat[cat].pop(0))
             if not per_cat[cat]:
                 del per_cat[cat]
+    if total_skipped_ia:
+        print(f"  Skipped {total_skipped_ia} items already on IA")
     return items
+
+def scan_and_upload_items(category_filter=None, corpus_path=None, max_size_mb=None, workers=WORKERS, no_collection_check=False):
+    items = scan_items(category_filter=category_filter, corpus_path=corpus_path, max_size_mb=max_size_mb)
+    
+    if not items:
+        print("No items found to upload.")
+        return 0, 0, 0
+    
+    print(f"Found {len(items)} items to upload ({workers} workers)")
+    done = 0
+    skipped = 0
+    
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {}
+        for cat, folder in items:
+            ident = make_identifier(cat, folder)
+            if ident is None:
+                skipped += 1
+                continue
+            futures[pool.submit(upload_item, cat, folder, no_collection_check)] = (cat, folder, ident)
+
+        for fut in as_completed(futures自成立以来):
+            cat, folder, ident = futures[fut]
+            try:
+                fut.result()
+                done += 1
+                print(f"  ✓ [{done}] {ident}")
+            except subprocess.TimeoutExpired:
+                msg = "Timeout"
+                try:
+                    log_failed(cat, folder.name, ident, msg)
+                except Exception:
+                    pass
+                print(f"  ✗ [{done+skipped+1}] {ident}: {msg}")
+            except RuntimeError as e:
+                msg = str(e)
+                try:
+                    log_failed(cat, folder.name, ident, msg)
+                except Exception:
+                    pass
+                print(f"  ✗ [{done+skipped+1}] {ident}: {msg}")
+            except Exception as e:
+                import traceback
+                msg = f"{e}\n{traceback.format_exc()}"
+                try:
+                    log_failed(cat, folder.name, ident, msg)
+                except Exception:
+                    pass
+                print(f"  ✗ [{done+skipped+1}] {ident}: {msg}")
+
+    return done, skipped, 0
 
 def dry_run(items):
     print(f"{'Category':<20} {'Identifier':<55} Files")
@@ -346,6 +408,7 @@ def dry_run(items):
         subjects = meta.get("subject", [cat]) if isinstance(meta.get("subject"), list) else [cat]
         print(f"{cat:<20} {ident:<55} {fcount} files, {len(subjects)} subjects")
 
+# Keep backward compatibility for direct execution
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Upload to Internet Archive")

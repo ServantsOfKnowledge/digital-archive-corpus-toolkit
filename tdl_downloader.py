@@ -53,7 +53,7 @@ import sys
 import time
 import unicodedata
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -313,7 +313,7 @@ def extract_article_data(article_url: str) -> dict:
         "cover_url": "",
         "pdf_filename": "",
         "marc_url": "",
-        "scrape_date": datetime.utcnow().isoformat(),
+        "scrape_date": datetime.now(timezone.utc).isoformat(),
     }
 
     flip_input = soup.find("input", {"id": "flip_book_value"})
@@ -518,7 +518,7 @@ def transform_to_ia_metadata(data: dict) -> dict:
 
 def process_article(article_url: str, output_dir: Path,
                     download_pdf: bool = True, download_cover: bool = True,
-                    cat_name: str = "downloads") -> dict:
+                    cat_name: str = "downloads", upload_to_ia: bool = False) -> dict:
     try:
         data = extract_article_data(article_url)
     except Exception as e:
@@ -539,10 +539,26 @@ def process_article(article_url: str, output_dir: Path,
 
     art_dir.mkdir(parents=True, exist_ok=True)
 
+    # Save metadata first (needed for make_identifier)
     meta_ia = transform_to_ia_metadata(data)
     meta_file = art_dir / "metadata.json"
     with open(meta_file, "w", encoding="utf-8") as f:
         json.dump(meta_ia, f, ensure_ascii=False, indent=2)
+
+    # Check if already on IA before downloading files
+    if upload_to_ia:
+        try:
+            from tdl_upload import make_identifier, already_on_ia
+            identifier = make_identifier(cat_name, art_dir)
+            if identifier and already_on_ia(identifier):
+                log.info("Item %s (%s) already on IA, skipping download", identifier, art_id)
+                return {"url": article_url, "id": art_id, "title": data["title"],
+                        "dir": str(art_dir), "status": "already_on_ia",
+                        "message": "Item already on Internet Archive"}
+        except ImportError:
+            log.warning("Cannot import tdl_upload; skipping IA check")
+        except Exception as e:
+            log.warning("Could not check IA status for %s: %s", art_id, e)
 
     result = {
         "url": article_url, "id": art_id, "title": data["title"],
@@ -577,6 +593,30 @@ def process_article(article_url: str, output_dir: Path,
             result["pdf_size"] = sz
             result["pdf"] = True
 
+    # Upload to IA immediately if requested and downloaded successfully
+    if upload_to_ia and result.get("status") == "complete":
+        try:
+            from tdl_upload import upload_item
+            log.info("Uploading %s to IA...", art_id)
+            success = upload_item(cat_name, art_dir)
+            if success:
+                result["status"] = "complete_and_uploaded"
+                result["uploaded"] = True
+                # Clean up local files after successful upload
+                try:
+                    import shutil
+                    shutil.rmtree(art_dir, ignore_errors=True)
+                    log.info("  Cleaned up local files for %s after successful upload", art_id)
+                except Exception as cleanup_err:
+                    log.warning("  Failed to clean up local files for %s: %s", art_id, cleanup_err)
+            else:
+                result["status"] = "upload_failed"
+                result["upload_error"] = "upload_item returned False"
+        except Exception as e:
+            log.error("Failed to upload %s to IA: %s", art_id, e)
+            result["status"] = "upload_failed"
+            result["upload_error"] = str(e)
+
     return result
 
 
@@ -592,7 +632,7 @@ def load_progress(path: Path) -> dict:
 
 
 def save_progress(path: Path, state: dict):
-    state["timestamp"] = datetime.utcnow().isoformat()
+    state["timestamp"] = datetime.now(timezone.utc).isoformat()
     with open(path, "w") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
@@ -682,7 +722,7 @@ def cmd_list(args):
         "inner_cat_id": args.inner_cat_id or "",
         "total": len(articles),
         "articles": articles,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     with open(args.output, "w") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
@@ -750,7 +790,7 @@ def cmd_download(args):
     save_progress(progress_file, state)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
-        futures = {executor.submit(process_article, url, output_dir, True, True, cat_name): url for url in to_process}
+        futures = {executor.submit(process_article, url, output_dir, True, True, cat_name, getattr(args, 'upload_immediately', False)): url for url in to_process}
         with tqdm(total=len(to_process), desc="Articles", unit="art") as pbar:
             for future in concurrent.futures.as_completed(futures):
                 url = futures[future]
@@ -763,12 +803,14 @@ def cmd_download(args):
                         if art_id in pending_ids:
                             state["pending"].remove(art_id)
                             pending_ids.discard(art_id)
-                        if result.get("status") == "complete":
+                        if result.get("status") in ("complete", "already_on_ia", "complete_and_uploaded"):
                             if art_id not in completed_ids:
                                 state["completed"].append(art_id)
                                 completed_ids.add(art_id)
                             # Remove from failed list if it was a retry
                             state["failed"] = [f for f in state["failed"] if f.get("url") != url and f.get("id") != art_id]
+                            if result.get("status") == "already_on_ia":
+                                log.info("  Item %s already on IA (skipped)", art_id)
                         else:
                             # Remove previous failed entry for this url if any, then re-append
                             state["failed"] = [f for f in state["failed"] if f.get("url") != url]
@@ -844,7 +886,7 @@ def cmd_corpus(args):
         "total_documents": len(corpus),
         "total_size_bytes": total_size,
         "missing_pdfs": missing_pdf,
-        "generated": datetime.utcnow().isoformat(),
+        "generated": datetime.now(timezone.utc).isoformat(),
         "documents": corpus,
     }
 
@@ -897,7 +939,7 @@ def cmd_fetch(args):
             "inner_cat_id": args.inner_cat_id or "",
             "total": len(articles),
             "articles": articles,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         with open(listing_file, "w") as f:
             json.dump(listing, f, ensure_ascii=False, indent=2)
@@ -911,9 +953,11 @@ def cmd_fetch(args):
     args.input = str(listing_file)
     args.urls = None
     args.cat_name = cat_name
-    # Carry retry flag
+    # Carry retry and upload-immediately flags
     if not hasattr(args, 'retry'):
         args.retry = False
+    if not hasattr(args, 'upload_immediately'):
+        args.upload_immediately = False
     cmd_download(args)
 
 
@@ -945,10 +989,11 @@ def main():
     p_down.add_argument("--retry", action="store_true", help="Only retry previously failed items")
     p_down.add_argument("--skip-existing", help="Skip article IDs already present in this directory (e.g. /Volumes/BMShri Back/tdl_corpus)")
     p_down.add_argument("--cat-name", default="downloads", help="Category subdirectory name")
+    p_down.add_argument("--upload-immediately", action="store_true", help="Upload to Internet Archive immediately after download completes")
 
     p_fetch = sub.add_parser("fetch", help="List articles by category and download them all")
     p_fetch.add_argument("--cat-id", type=int, default=20, help="Category ID (default: 20=Book)")
-    p_fetch.add_argument("--sub-cat-id", help="Sub-category ID")
+    p_fetch.add_argument("--subBond-cat-id", help="Sub-category ID")
     p_fetch.add_argument("--inner-cat-id", help="Inner category ID")
     p_fetch.add_argument("--dir", default="tdl_output", help="Output directory")
     p_fetch.add_argument("--workers", type=int, default=5, help="Parallel downloads")
@@ -957,6 +1002,7 @@ def main():
     p_fetch.add_argument("--force", action="store_true", help="Re-list articles from source even if listing exists")
     p_fetch.add_argument("--retry", action="store_true", help="Only retry previously failed items")
     p_fetch.add_argument("--skip-existing", help="Skip article IDs already present in this directory (e.g. /Volumes/BMShri Back/tdl_corpus)")
+    p_fetch.add_argument("--upload-immediately", action="store_true", help="Upload downloaded items to Internet Archive immediately")
 
     p_corpus = sub.add_parser("corpus", help="Build consolidated corpus index from downloads")
     p_corpus.add_argument("--dir", default="tdl_output", help="Output directory with downloads/")
