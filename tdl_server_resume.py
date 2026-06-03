@@ -52,22 +52,45 @@ def download_categories(categories, workers):
     Multi-worker support: The --workers flag is passed to tdl_downloader.py,
     which uses ThreadPoolExecutor internally for parallel processing within
     each category. Categories are processed sequentially.
+    
+    If one category fails, logs the error and continues with the next.
     """
+    success = []
+    failed = []
+    
     for cat in categories:
         listing = CORPUS / f"listing_{cat}.json"
         if not listing.exists():
-            raise SystemExit(f"Missing listing file: {listing}")
+            log.error("Missing listing file: %s", listing)
+            failed.append(cat)
+            continue
+        
         log.info("Starting download+upload pipeline for category: %s (workers=%s)", cat, workers)
-        run([
-            "python3", "tdl_downloader.py", "download",
-            "--input", str(listing),
-            "--dir", str(CORPUS),
-            "--cat-name", cat,
-            "--workers", str(workers),
-            "--resume",
-            "--upload-immediately",
-        ])
-        log.info("Completed download+upload pipeline for category: %s", cat)
+        try:
+            run([
+                "python3", "tdl_downloader.py", "download",
+                "--input", str(listing),
+                "--dir", str(CORPUS),
+                "--cat-name", cat,
+                "--workers", str(workers),
+                "--resume",
+                "--upload-immediately",
+            ])
+            log.info("Completed download+upload pipeline for category: %s", cat)
+            success.append(cat)
+        except subprocess.CalledProcessError as e:
+            log.error("Failed to process category %s: %s", cat, e)
+            failed.append(cat)
+        except Exception as e:
+            log.error("Unexpected error processing category %s: %s", cat, e)
+            failed.append(cat)
+    
+    # Summary
+    log.info("=" * 60)
+    log.info("Download+upload pipeline summary:")
+    log.info("  Successful: %s", success if success else "None")
+    log.info("  Failed:     %s", failed if failed else "None")
+    log.info("=" * 60)
 
 
 def start_uploads(categories, workers, max_size_mb):
