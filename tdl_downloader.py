@@ -550,8 +550,26 @@ def process_article(article_url: str, output_dir: Path,
         try:
             from tdl_upload import make_identifier, already_on_ia
             identifier = make_identifier(cat_name, art_dir)
+            
+            # Check if already in upload_progress.json first (fast, no network call)
+            progress_file = Path(__file__).parent / "upload_progress.json"
+            if progress_file.exists():
+                try:
+                    upload_progress = json.loads(progress_file.read_text())
+                    uploaded_ids = set(upload_progress.get("uploaded", []))
+                    if identifier in uploaded_ids:
+                        log.info("Item %s (%s) already recorded in upload_progress.json, skipping", identifier, art_id)
+                        return {"url": article_url, "id": art_id, "title": data["title"],
+                                "dir": str(art_dir), "status": "already_uploaded",
+                                "message": "Item already recorded as uploaded"}
+                except (json.JSONDecodeError, FileNotFoundError):
+                    pass
+            
+            # Check IA only if not in upload_progress.json
             if identifier and already_on_ia(identifier):
                 log.info("Item %s (%s) already on IA, skipping download", identifier, art_id)
+                # Record it in upload_progress.json since it's on IA
+                _update_upload_progress(identifier, cat_name)
                 return {"url": article_url, "id": art_id, "title": data["title"],
                         "dir": str(art_dir), "status": "already_on_ia",
                         "message": "Item already on Internet Archive"}
@@ -596,12 +614,18 @@ def process_article(article_url: str, output_dir: Path,
     # Upload to IA immediately if requested and downloaded successfully
     if upload_to_ia and result.get("status") == "complete":
         try:
-            from tdl_upload import upload_item
+            from tdl_upload import upload_item, make_identifier
             log.info("Uploading %s to IA...", art_id)
             success = upload_item(cat_name, art_dir)
             if success:
                 result["status"] = "complete_and_uploaded"
                 result["uploaded"] = True
+                # Update upload_progress.json
+                try:
+                    identifier = make_identifier(cat_name, art_dir)
+                    _update_upload_progress(identifier, cat_name)
+                except Exception as progress_err:
+                    log.warning("  Failed to update upload_progress.json for %s: %s", art_id, progress_err)
                 # Clean up local files after successful upload
                 try:
                     import shutil
@@ -612,12 +636,78 @@ def process_article(article_url: str, output_dir: Path,
             else:
                 result["status"] = "upload_failed"
                 result["upload_error"] = "upload_item returned False"
+                # Log to upload_failed.json
+                try:
+                    identifier = make_identifier(cat_name, art_dir)
+                    _log_upload_failed(cat_name, art_dir.name, identifier, "upload_item returned False")
+                except Exception as failed_err:
+                    log.warning("  Failed to log upload failure for %s: %s", art_id, failed_err)
         except Exception as e:
             log.error("Failed to upload %s to IA: %s", art_id, e)
             result["status"] = "upload_failed"
             result["upload_error"] = str(e)
+            # Log to upload_failed.json
+            try:
+                from tdl_upload import make_identifier
+                identifier = make_identifier(cat_name, art_dir)
+                _log_upload_failed(cat_name, art_dir.name, identifier, str(e))
+            except Exception as failed_err:
+                log.warning("  Failed to log upload failure for %s: %s", art_id, failed_err)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Upload progress helpers
+# ---------------------------------------------------------------------------
+
+def _update_upload_progress(identifier: str, category: str):
+    """Update upload_progress.json with newly uploaded item."""
+    from pathlib import Path
+    import json
+    UPLOAD_PROGRESS_FILE = Path(__file__).parent / "upload_progress.json"
+    try:
+        progress = {"uploaded": [], "uploaded_by_cat": {}, "failed": []}
+        if UPLOAD_PROGRESS_FILE.exists():
+            try:
+                progress = json.loads(UPLOAD_PROGRESS_FILE.read_text())
+            except json.JSONDecodeError:
+                pass
+        uploaded_ids = set(progress.get("uploaded", []))
+        if identifier not in uploaded_ids:
+            uploaded_ids.add(identifier)
+            progress["uploaded"] = list(uploaded_ids)
+            progress.setdefault("uploaded_by_cat", {})
+            progress["uploaded_by_cat"][category] = progress["uploaded_by_cat"].get(category, 0) + 1
+            tmp = UPLOAD_PROGRESS_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(progress, indent=2))
+            tmp.replace(UPLOAD_PROGRESS_FILE)
+    except Exception:
+        pass
+
+
+def _log_upload_failed(category: str, folder: str, identifier: str, reason: str):
+    """Log failed upload to upload_failed.json."""
+    from pathlib import Path
+    import json
+    UPLOAD_FAILED_FILE = Path(__file__).parent / "upload_failed.json"
+    try:
+        failed = []
+        if UPLOAD_FAILED_FILE.exists():
+            try:
+                failed = json.loads(UPLOAD_FAILED_FILE.read_text())
+            except json.JSONDecodeError:
+                pass
+        failed.append({
+            "category": category, "folder": folder,
+            "identifier": identifier, "reason": reason,
+            "time": datetime.now(timezone.utc).isoformat(),
+        })
+        tmp = UPLOAD_FAILED_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(failed, indent=2))
+        tmp.replace(UPLOAD_FAILED_FILE)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

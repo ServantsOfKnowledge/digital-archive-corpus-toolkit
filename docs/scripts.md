@@ -6,6 +6,7 @@ Download items from Tamil Digital Library (tamildigitallibrary.in) to local disk
 ```
 python3 tdl_downloader.py fetch --cat-id 20 --dir ./tdl_corpus --workers 3 --resume
 python3 tdl_downloader.py fetch --cat-id 21 --dir ./tdl_corpus --workers 3 --resume --skip-existing /path/to/external/drive
+python3 tdl_downloader.py download --input listing.json --dir ./tdl_corpus --workers 3 --upload-immediately
 ```
 
 **Flags:**
@@ -16,12 +17,21 @@ python3 tdl_downloader.py fetch --cat-id 21 --dir ./tdl_corpus --workers 3 --res
 - `--retry` — retry only failed items
 - `--force` — re-fetch listings from source (ignore cache)
 - `--skip-existing PATH` — scan PATH and skip articles already present there (prevents re-downloading duplicates)
+- `--upload-immediately` — upload each item to IA immediately after download (pipeline mode)
 
 **Progress Tracking:**
 - Maintains `{output_dir}/progress.json` with `completed`, `pending`, and `failed` article IDs
 - On resume, completed items are automatically skipped
 - Failed items are retried unless `--retry-failed` is specified (which processes only failed items)
 - Supports HTTP range requests for resuming interrupted file transfers
+
+**Pipeline Mode (`--upload-immediately`):**
+- Checks if item already exists on IA before downloading (via `tdl_upload.already_on_ia`)
+- If already on IA: skips download, marks as completed
+- If not on IA: downloads files, then immediately uploads to IA
+- On successful upload: deletes local folder to free disk space
+- On upload failure: keeps local files for retry
+- Upload errors are tracked in `upload_failed.json`
 
 **Deduplication:**
 When `--skip-existing PATH` is used:

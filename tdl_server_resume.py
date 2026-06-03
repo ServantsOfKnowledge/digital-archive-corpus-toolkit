@@ -2,10 +2,17 @@
 """Prepare a server checkout to redownload corpus items and resume uploads."""
 
 import argparse
+import logging
 import shutil
 import subprocess
 from pathlib import Path
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent
 CORPUS = ROOT / "tdl_corpus"
@@ -40,10 +47,17 @@ def restore_state(state_dir: Path):
 
 
 def download_categories(categories, workers):
+    """Download and immediately upload items for each category.
+    
+    Multi-worker support: The --workers flag is passed to tdl_downloader.py,
+    which uses ThreadPoolExecutor internally for parallel processing within
+    each category. Categories are processed sequentially.
+    """
     for cat in categories:
         listing = CORPUS / f"listing_{cat}.json"
         if not listing.exists():
             raise SystemExit(f"Missing listing file: {listing}")
+        log.info("Starting download+upload pipeline for category: %s (workers=%s)", cat, workers)
         run([
             "python3", "tdl_downloader.py", "download",
             "--input", str(listing),
@@ -53,9 +67,18 @@ def download_categories(categories, workers):
             "--resume",
             "--upload-immediately",
         ])
+        log.info("Completed download+upload pipeline for category: %s", cat)
 
 
 def start_uploads(categories, workers, max_size_mb):
+    """Start background upload processes for residual items.
+    
+    This is a safety net for any items that failed during the 
+    download+upload pipeline. Runs tdl_upload.py in background.
+    
+    Multi-worker support: --workers is passed to tdl_upload.py which
+    uses ThreadPoolExecutor internally for parallel uploads.
+    """
     for cat in categories:
         log_name = f"{cat.lower()}_upload.log"
         if cat == "Book":
@@ -78,12 +101,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", default="server_state", help="Directory containing upload state and listing files")
     parser.add_argument("--cat", nargs="+", default=["Book", "Periodical"], help="Categories to process")
-    parser.add_argument("--workers", type=int, default=3)
+    parser.add_argument("--workers", type=int, default=3, help="Number of parallel workers (passed to downloader/uploader)")
     parser.add_argument("--max-size-mb", type=float, default=None,
                         help="Optional upload size cap; omitted means upload all downloaded items")
     parser.add_argument("--restore-state", action="store_true")
-    parser.add_argument("--download", action="store_true")
-    parser.add_argument("--start-uploads", action="store_true")
+    parser.add_argument("--download", action="store_true", help="Download and immediately upload items")
+    parser.add_argument("--start-uploads", action="store_true", help="Start background upload processes for residual items")
     args = parser.parse_args()
 
     if args.restore_state:
@@ -93,6 +116,7 @@ def main():
     if args.start_uploads:
         # After immediate uploads from downloader, run a fresh pass to catch any items
         # that failed during the download+upload pipeline (e.g. transient errors)
+        log.info("Starting safety-net upload pass for residual items")
         start_uploads(args.cat, args.workers, args.max_size_mb)
     if not (args.restore_state or args.download or args.start_uploads):
         parser.print_help()

@@ -27,19 +27,23 @@ Restore state and listings:
 python3 tdl_server_resume.py --restore-state
 ```
 
-Redownload Book and Periodical items from TDL:
+Download + upload Book and Periodical items (integrated pipeline):
 
 ```bash
 python3 tdl_server_resume.py --download --cat Book Periodical --workers 3
 ```
 
-Start uploads:
+This downloads items and uploads them to IA immediately after each successful download. Items already on IA are skipped. Local files are cleaned up after successful upload.
+
+**Safety net** — retry any items that failed during the pipeline:
 
 ```bash
 python3 tdl_server_resume.py --start-uploads --cat Book Periodical --workers 3
 ```
 
 To intentionally limit uploads by local folder size, add `--max-size-mb 100`.
+
+**Multi-worker support:** `--workers` controls parallel threads within each category. Categories are processed sequentially, but items within a category are handled concurrently.
 
 Monitor:
 

@@ -20,6 +20,9 @@ python tdl_downloader.py download --input listing.json --dir tdl_corpus --worker
 # Fetch (list + download) all articles
 python tdl_downloader.py fetch --cat-id 20 --dir tdl_corpus --workers 5
 
+# Download + upload immediately (pipeline mode)
+python tdl_downloader.py download --input listing.json --dir tdl_corpus --workers 5 --upload-immediately
+
 # Build corpus index
 python tdl_downloader.py corpus --dir tdl_corpus --csv
 ```
@@ -30,7 +33,8 @@ python tdl_downloader.py corpus --dir tdl_corpus --csv
 - **Skip existing** (`--skip-existing PATH`): Scans an external directory for article IDs and marks them as completed (avoids re-downloading duplicates)
 - **Partial downloads:** Supports HTTP range requests to resume interrupted file transfers
 - **Retry behavior:** Automatically retries transient errors (timeout, connection reset) with exponential backoff
-- **No deletion:** Downloaded items remain on disk unless manually deleted after successful upload
+- **IA deduplication:** With `--upload-immediately`, checks if item already exists on IA before downloading
+- **Auto-cleanup:** With `--upload-immediately`, deletes local files after successful upload
 
 ### `tdl_upload.py`
 
@@ -62,13 +66,22 @@ Use this when upload logs contain `Uploaded content is unacceptable. - error che
 
 Prepares a fresh server checkout to pick up upload/download work without copying downloaded corpus files. The handoff package contains code, source listings, and upload state; the server redownloads content from TDL and resumes uploads from `upload_progress.json`.
 
+**Integrated download + upload pipeline** (downloads and uploads each item immediately):
+
 ```bash
 tar -xzf tmvu-corpus-server-handoff.tar.gz
 cd tmvu-corpus-server-handoff
 python3 tdl_server_resume.py --restore-state
 python3 tdl_server_resume.py --download --cat Book Periodical --workers 3
+```
+
+**Safety net** (retry any items that failed during the pipeline):
+
+```bash
 python3 tdl_server_resume.py --start-uploads --cat Book Periodical --workers 3
 ```
+
+**Multi-worker support:** The `--workers` flag is passed to `tdl_downloader.py` and `tdl_upload.py`, which both use thread pools for parallel processing. Categories are processed sequentially, but items within each category are handled concurrently.
 
 See `docs/server-handoff.md` for the full server setup and monitoring workflow.
 
@@ -189,16 +202,18 @@ Progress tracked in `unzip_done.json` (resumable).
    - Completed items are skipped automatically
    - Failed items can be retried with `--resume` flag
    - Supports `--skip-existing PATH` to avoid re-downloading duplicates from external drives
-3. **Metadata extraction**: Scrapes metadata for each article into `metadata.json`
-4. **Corpus indexing** (`corpus`): Generates JSON/CSV indexes of downloaded items
+3. **IA deduplication** (with `--upload-immediately`): Checks if item already exists on IA before downloading
+4. **Metadata extraction**: Scrapes metadata for each article into `metadata.json`
+5. **Corpus indexing** (`corpus`): Generates JSON/CSV indexes of downloaded items
 
 ### Upload Workflow
 1. **Scan categories**: Finds all folders with `metadata.json`
-2. **Check IA**: Verifies if item already exists on Internet Archive
+2. **Check IA**: Verifies if item already exists on Internet Archive (skips if found)
 3. **Upload files**: Uploads PDF, cover, and metadata to IA
 4. **Track progress**: Records uploaded items in `upload_progress.json`
 5. **Clean up**: Automatically deletes source folders after successful upload
 6. **Retry failed**: Failed uploads are logged in `upload_failed.json` for later retry
+7. **Pipeline mode** (`--upload-immediately`): Download and upload happen as a single atomic step per item
 
 ### Key Characteristics
 - **Downloads are deleted after successful upload** to manage local disk space
@@ -206,6 +221,9 @@ Progress tracked in `unzip_done.json` (resumable).
 - **Parallel processing**: All operations support configurable worker threads
 - **Error recovery**: Transient errors are automatically retried with exponential backoff
 - **Deduplication**: `--skip-existing` flag prevents re-downloading items from other drives
+- **IA deduplication**: Checks IA before downloading/uploading to avoid duplicate work
+- **Pipeline mode**: `--upload-immediately` downloads and uploads each item atomically
+- **Auto-cleanup**: Local files are removed after successful upload (can be retried on failure)
 - **Atomic operations**: Multi-threaded uploads use atomic file writes to prevent corruption
 
 ## Output Structure
