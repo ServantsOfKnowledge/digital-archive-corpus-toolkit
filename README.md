@@ -2,6 +2,40 @@
 
 A comprehensive downloader, uploader, and corpus builder for digital archival collections hosted on the Tamil Digital Library (TDL). Uploads to Internet Archive under the **TamilVirtualAcademy** collection.
 
+## School Books Archive metadata adapter
+
+`sba_harvester.py` incrementally inventories the [School Books Archive](https://schoolbooksarchive.azimpremjiuniversity.edu.in/), enriches each record with its public metadata and bitstream landing-page records, detects existing Internet Archive references, and produces JSONL/CSV exports plus a non-executing IA migration plan.
+
+```bash
+# Complete paginated listing (resumable upserts into SQLite)
+python3 sba_harvester.py inventory
+
+# Fetch full public metadata and file records; safe to resume
+python3 sba_harvester.py enrich --workers 3
+
+# Export normalized records
+python3 sba_harvester.py export
+
+# Produce an IA plan; this does not download or upload anything
+python3 sba_harvester.py ia-plan --collection AzimPremjiUniversity
+
+# Preview or execute downloads for records without existing IA references
+python3 sba_harvester.py download --limit 10
+python3 sba_harvester.py download --limit 10 --execute
+
+# Preview or execute IA uploads. Local source files are never auto-deleted.
+python3 sba_harvester.py ia-upload --limit 10
+python3 sba_harvester.py ia-upload --limit 10 --execute
+```
+
+For a small verification run, add `--max-items 5` to `inventory` and `--limit 5` to `enrich`.
+
+The adapter keeps download and upload operations behind explicit `--execute` flags. It checks both source metadata/file records and the intended IA identifier before uploading, and it never automatically deletes local files. The intended collection is `AzimPremjiUniversity`. Records containing an `archive.org` reference are classified as `skip_existing_ia_reference`.
+
+New IA identifiers use the stable form `apu.sba.{handle-suffix}.1`, following the collection's existing `apu.*` convention rather than a title-derived identifier.
+
+[SBA's published policy](https://schoolbooksarchive.azimpremjiuniversity.edu.in/DataPolicy.html) restricts robotic harvesting of full items. Only use `--execute` under the archival-partner authorization applicable to this project.
+
 ## Scripts
 
 ### `tdl_downloader.py`

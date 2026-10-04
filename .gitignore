@@ -1,6 +1,8 @@
 # Downloads and corpus data
 tdl_corpus/
 tdl_verify/
+sba_data/
+sba_corpus/
 *.log
 *.tar.gz
 
