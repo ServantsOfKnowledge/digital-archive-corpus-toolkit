@@ -44,6 +44,7 @@ NS = {
 SOURCE_FILE_RE = re.compile(r"/([0-9]+)/([0-9]+)/([^/?#]+)")
 IA_IDENTIFIER_RE = re.compile(r"^apu\.anuvadasampada\.(hin|kan)\.(\d+)(?:\.(\d+))?$")
 LANGUAGE = {"hi": "hin", "kn": "kan", "hin": "hin", "kan": "kan"}
+EMPTY_MD5 = hashlib.md5(b"").hexdigest()
 _local = threading.local()
 
 
@@ -296,12 +297,15 @@ def fetch_enrichment(record_id: int) -> dict[str, Any]:
         if not filename or (mime_type != "application/pdf" and not filename.lower().endswith(".pdf")):
             continue
         source_url = f"{BASE_URL}/{record_id}/{number}/{quote(filename, safe='')}"
+        filesize = file_record.get("filesize")
         documents.append({
             "document_number": number,
             "filename": filename,
             "source_url": source_url,
             "mime_type": mime_type or "application/pdf",
-            "expected_size": int(file_record.get("filesize") or 0) or None,
+            # Preserve a reported zero. In EPrints it means the document has
+            # no stored content, and its public URL commonly returns HTTP 500.
+            "expected_size": int(filesize) if filesize is not None else None,
             "source_md5": file_record.get("hash") if file_record.get("hash_type") == "MD5" else None,
         })
     return {"metadata": metadata, "language": language, "documents": documents}
@@ -313,6 +317,12 @@ def intended_identifier(language: str, record_id: int, document_number: int) -> 
     if language == "kan":
         return f"apu.anuvadasampada.kan.{record_id}"
     return ""
+
+
+def source_document_unavailable(document: Any) -> bool:
+    return document["expected_size"] == 0 or (
+        str(document["source_md5"] or "").lower() == EMPTY_MD5
+    )
 
 
 def enrich(db_path: Path, workers: int, limit: int | None, refresh: bool) -> None:
@@ -364,7 +374,12 @@ def enrich(db_path: Path, workers: int, limit: int | None, refresh: bool) -> Non
                         number = document["document_number"]
                         found_numbers.append(number)
                         ia_id = intended_identifier(language, record_id, number)
-                        classification = "pending_reconcile" if ia_id else "unsupported_language"
+                        if not ia_id:
+                            classification = "unsupported_language"
+                        elif source_document_unavailable(document):
+                            classification = "source_unavailable"
+                        else:
+                            classification = "pending_reconcile"
                         db.execute(
                             """INSERT INTO documents
                                (record_id,document_number,filename,source_url,mime_type,
@@ -375,9 +390,9 @@ def enrich(db_path: Path, workers: int, limit: int | None, refresh: bool) -> Non
                                  mime_type=excluded.mime_type,expected_size=excluded.expected_size,
                                  source_md5=excluded.source_md5,ia_identifier=excluded.ia_identifier,
                                  classification=CASE
-                                   WHEN documents.source_url<>excluded.source_url
-                                     OR documents.ia_identifier<>excluded.ia_identifier
-                                   THEN excluded.classification ELSE documents.classification END,
+                                   WHEN documents.classification='existing_ia'
+                                   THEN documents.classification
+                                   ELSE excluded.classification END,
                                  updated_at=excluded.updated_at""",
                             (
                                 record_id, number, document["filename"], document["source_url"],
@@ -481,9 +496,14 @@ def reconcile_ia(db_path: Path) -> None:
                 # Old Kannada items omit the document number. A record-level
                 # fallback is unambiguous only when the source has one PDF.
                 matched = by_record[document["record_id"]][0]
-            classification = "existing_ia" if matched else (
-                "missing_ia" if document["ia_identifier"] else "unsupported_language"
-            )
+            if matched:
+                classification = "existing_ia"
+            elif not document["ia_identifier"]:
+                classification = "unsupported_language"
+            elif source_document_unavailable(document):
+                classification = "source_unavailable"
+            else:
+                classification = "missing_ia"
             db.execute(
                 "UPDATE documents SET classification=?,existing_ia_identifier=?,updated_at=? WHERE record_id=? AND document_number=?",
                 (classification, matched, utc_now(), document["record_id"], document["document_number"]),
@@ -520,13 +540,42 @@ def download_one(root: Path, row: sqlite3.Row, execute: bool) -> dict[str, Any]:
         return {**result, "status": "planned"}
     if existing_local_file(row):
         return {**result, "status": "already_downloaded", "size": row["size"], "sha256": row["sha256"]}
+    if source_document_unavailable(row):
+        return {
+            **result,
+            "status": "source_unavailable",
+            "error": "EPrints reports an empty source file (0 bytes / empty MD5)",
+        }
+    source_url = row["source_url"]
+    # Older database rows did not preserve EPrints' reported zero size. If a
+    # download already failed, refresh just this record before another retry.
+    if row["download_status"] == "failed":
+        refreshed = fetch_enrichment(row["record_id"])
+        current = next(
+            (
+                document for document in refreshed["documents"]
+                if document["document_number"] == row["document_number"]
+            ),
+            None,
+        )
+        if current and source_document_unavailable(current):
+            return {
+                **result,
+                "status": "source_unavailable",
+                "error": "EPrints reports an empty source file (0 bytes / empty MD5)",
+                "source_url": current["source_url"],
+                "expected_size": current["expected_size"],
+                "source_md5": current["source_md5"],
+            }
+        if current:
+            source_url = current["source_url"]
     destination.parent.mkdir(parents=True, exist_ok=True)
     partial = destination.with_suffix(destination.suffix + ".part")
     digest = hashlib.sha256()
     md5 = hashlib.md5()
     partial_size = partial.stat().st_size if partial.exists() else 0
     headers = {"Range": f"bytes={partial_size}-"} if partial_size else {}
-    response = session().get(row["source_url"], headers=headers, stream=True, timeout=(30, 900))
+    response = session().get(source_url, headers=headers, stream=True, timeout=(30, 900))
     response.raise_for_status()
     resumed = partial_size > 0 and response.status_code == 206
     if resumed:
@@ -579,14 +628,33 @@ def download(db_path: Path, root: Path, workers: int, limit: int | None, execute
                 try:
                     result = future.result()
                     if execute:
-                        db.execute(
-                            """UPDATE documents SET path=?,size=?,sha256=?,download_status=?,
-                               download_error=NULL,updated_at=? WHERE record_id=? AND document_number=?""",
-                            (
-                                result["path"], result.get("size"), result.get("sha256"), result["status"],
-                                utc_now(), row["record_id"], row["document_number"],
-                            ),
-                        )
+                        if result["status"] == "source_unavailable":
+                            db.execute(
+                                """UPDATE documents SET classification='source_unavailable',
+                                   source_url=COALESCE(?,source_url),
+                                   expected_size=COALESCE(?,expected_size),
+                                   source_md5=COALESCE(?,source_md5),
+                                   download_status='source_unavailable',download_error=?,updated_at=?
+                                   WHERE record_id=? AND document_number=?""",
+                                (
+                                    result.get("source_url"), result.get("expected_size"),
+                                    result.get("source_md5"), result["error"], utc_now(),
+                                    row["record_id"], row["document_number"],
+                                ),
+                            )
+                            logging.warning(
+                                "%s/%s: source unavailable (empty EPrints file)",
+                                row["record_id"], row["document_number"],
+                            )
+                        else:
+                            db.execute(
+                                """UPDATE documents SET path=?,size=?,sha256=?,download_status=?,
+                                   download_error=NULL,updated_at=? WHERE record_id=? AND document_number=?""",
+                                (
+                                    result["path"], result.get("size"), result.get("sha256"), result["status"],
+                                    utc_now(), row["record_id"], row["document_number"],
+                                ),
+                            )
                         db.commit()
                 except Exception as exc:
                     db.execute(
@@ -717,6 +785,7 @@ def collect_status(db_path: Path) -> dict[str, Any]:
             "missing_on_ia": scalar("SELECT COUNT(*) FROM documents WHERE classification='missing_ia'"),
             "pending_ia_reconcile": scalar("SELECT COUNT(*) FROM documents WHERE classification='pending_reconcile'"),
             "unsupported_language": scalar("SELECT COUNT(*) FROM documents WHERE classification='unsupported_language'"),
+            "source_unavailable": scalar("SELECT COUNT(*) FROM documents WHERE classification='source_unavailable'"),
             "downloaded_missing": scalar("SELECT COUNT(*) FROM documents WHERE classification='missing_ia' AND download_status IN ('downloaded','already_downloaded')"),
             "download_failures": scalar("SELECT COUNT(*) FROM documents WHERE download_status='failed'"),
             "uploaded_this_run": scalar("SELECT COUNT(*) FROM documents WHERE upload_status='uploaded'"),

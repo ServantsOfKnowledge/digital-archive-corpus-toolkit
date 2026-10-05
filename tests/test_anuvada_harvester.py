@@ -67,6 +67,25 @@ class AnuvadaHarvesterTests(unittest.TestCase):
         self.assertIn("/2252/3/", result["documents"][0]["source_url"])
         self.assertNotIn(" ", result["documents"][0]["source_url"])
 
+    def test_fetch_enrichment_preserves_empty_source_file(self):
+        response = Mock()
+        response.json.return_value = {
+            "document_language": [{"type": "kn"}],
+            "documents": [{
+                "pos": 1, "main": "Missing.pdf", "security": "public",
+                "files": [{
+                    "filename": "Missing.pdf", "mime_type": "application/pdf",
+                    "filesize": 0, "hash_type": "MD5", "hash": ah.EMPTY_MD5,
+                }],
+            }],
+        }
+        response.raise_for_status.return_value = None
+        with patch.object(ah, "session") as mocked:
+            mocked.return_value.get.return_value = response
+            document = ah.fetch_enrichment(121)["documents"][0]
+        self.assertEqual(document["expected_size"], 0)
+        self.assertTrue(ah.source_document_unavailable(document))
+
     def test_inventory_resumes_with_saved_oai_token(self):
         page_one = ET.fromstring(f"""<OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
           <ListRecords>{OAI_RECORD}<resumptionToken>next-token</resumptionToken></ListRecords>
@@ -198,6 +217,39 @@ class AnuvadaHarvesterTests(unittest.TestCase):
             self.assertEqual(mocked.return_value.get.call_args.kwargs["headers"], {"Range": "bytes=3-"})
             self.assertEqual(destination.read_bytes(), b"abcdef")
             self.assertEqual(result["status"], "downloaded")
+            db.close()
+
+    def test_failed_legacy_row_is_reclassified_when_source_is_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = ah.connect_db(root / "test.sqlite3")
+            db.execute(
+                """INSERT INTO items
+                   (record_id,oai_identifier,datestamp,deleted,dc_json,source_url,listed_at)
+                   VALUES(121,'oai:x:121','2024',0,'{}','https://source/121/',?)""",
+                (ah.utc_now(),),
+            )
+            db.execute(
+                """INSERT INTO documents
+                   (record_id,document_number,filename,source_url,expected_size,source_md5,
+                    ia_identifier,classification,download_status,download_error,updated_at)
+                   VALUES(121,1,'Missing.pdf','https://source/121/1/Missing.pdf',NULL,NULL,
+                          'apu.anuvadasampada.kan.121','missing_ia','failed','HTTP 500',?)""",
+                (ah.utc_now(),),
+            )
+            row = db.execute("SELECT * FROM documents").fetchone()
+            refreshed = {
+                "documents": [{
+                    "document_number": 1,
+                    "source_url": "https://source/121/1/Missing.pdf",
+                    "expected_size": 0,
+                    "source_md5": ah.EMPTY_MD5,
+                }]
+            }
+            with patch.object(ah, "fetch_enrichment", return_value=refreshed):
+                result = ah.download_one(root, row, execute=True)
+            self.assertEqual(result["status"], "source_unavailable")
+            self.assertEqual(result["expected_size"], 0)
             db.close()
 
     def test_ia_metadata_supports_both_default_collections(self):
