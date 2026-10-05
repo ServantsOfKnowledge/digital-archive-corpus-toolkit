@@ -32,6 +32,9 @@ from urllib3.util.retry import Retry
 
 BASE_URL = "https://schoolbooksarchive.azimpremjiuniversity.edu.in"
 POLICY_URL = f"{BASE_URL}/DataPolicy.html"
+DEFAULT_IA_COLLECTION = "ServantsOfKnowledge"
+IA_IDENTIFIER_PREFIX = "sba"
+LEGACY_IA_IDENTIFIER_PREFIX = "apu.sba"
 USER_AGENT = "ServantsOfKnowledge-SBA-Metadata-Harvester/1.0 (+https://github.com/ServantsOfKnowledge/digital-archive-corpus-toolkit)"
 IA_URL_RE = re.compile(
     r"https?://(?:www\.)?(?:archive\.org|web\.archive\.org)/[^\s<>\"']+",
@@ -287,6 +290,10 @@ def item_directory(root: Path, record: dict[str, Any]) -> Path:
     return root / f"{suffix}_{title}"
 
 
+def sba_ia_identifier(record: dict[str, Any], prefix: str = IA_IDENTIFIER_PREFIX) -> str:
+    return f"{prefix}.{record['handle'].split('/')[-1]}.1"
+
+
 def write_json_atomic(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + ".tmp")
@@ -411,7 +418,7 @@ def download_one(record: dict[str, Any], root: Path, execute: bool) -> list[dict
             partial.unlink(missing_ok=True)
             raise
     if execute:
-        write_json_atomic(folder / "metadata.json", ia_metadata(record, "AzimPremjiUniversity"))
+        write_json_atomic(folder / "metadata.json", ia_metadata(record, DEFAULT_IA_COLLECTION))
         write_json_atomic(folder / "source_record.json", record)
         write_json_atomic(
             folder / "manifest.json",
@@ -506,7 +513,7 @@ def upload_records(
             record = row_to_record(row)
             if record["handle"] in completed:
                 continue
-            identifier = "apu.sba." + record["handle"].split("/")[-1] + ".1"
+            identifier = sba_ia_identifier(record)
             if record["internet_archive_identifiers"] or record["internet_archive_urls"]:
                 logging.info("%s: skip; source already references IA", record["handle"])
                 db.execute(
@@ -529,10 +536,17 @@ def upload_records(
             logging.info("No downloaded records remain to upload")
             return
         for record, files in candidates:
-            identifier = "apu.sba." + record["handle"].split("/")[-1] + ".1"
+            identifier = sba_ia_identifier(record)
             error = None
-            if ia_exists(identifier):
-                logging.info("%s: skip; %s already exists", record["handle"], identifier)
+            legacy_identifier = sba_ia_identifier(record, LEGACY_IA_IDENTIFIER_PREFIX)
+            existing_identifier = next(
+                (candidate for candidate in (identifier, legacy_identifier) if ia_exists(candidate)),
+                None,
+            )
+            stored_identifier = identifier
+            if existing_identifier:
+                stored_identifier = existing_identifier
+                logging.info("%s: skip; %s already exists", record["handle"], existing_identifier)
                 status = "already_on_ia"
             elif not execute:
                 logging.info("%s: would upload %s files as %s", record["handle"], len(files), identifier)
@@ -552,7 +566,7 @@ def upload_records(
                     logging.info("%s: uploaded", identifier)
             db.execute(
                 "INSERT OR REPLACE INTO ia_uploads VALUES (?, ?, ?, ?, ?)",
-                (record["handle"], identifier, status, error, utc_now()),
+                (record["handle"], stored_identifier, status, error, utc_now()),
             )
             db.commit()
 
@@ -842,7 +856,7 @@ def make_ia_plan(db_path: Path, output: Path, collection: str | None) -> None:
                 action = "download_and_upload_candidate"
             plan = {
                 "action": action,
-                "ia_identifier": "apu.sba." + record["handle"].split("/")[-1] + ".1",
+                "ia_identifier": sba_ia_identifier(record),
                 "source_handle": record["handle"],
                 "source_url": record["source_url"],
                 "existing_ia_identifiers": record["internet_archive_identifiers"],
@@ -889,7 +903,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     plan = sub.add_parser("ia-plan", help="Create a non-executing Internet Archive plan")
     plan.add_argument("--output", type=Path, default=Path("sba_data/ia_plan.jsonl"))
-    plan.add_argument("--collection", help="IA collection, only if permission has been confirmed")
+    plan.add_argument(
+        "--collection", default=DEFAULT_IA_COLLECTION,
+        help=f"IA collection (default: {DEFAULT_IA_COLLECTION})",
+    )
 
     download = sub.add_parser("download", help="Download non-IA-linked files; dry-run by default")
     download.add_argument("--root", type=Path, default=Path("sba_corpus"))
@@ -900,7 +917,7 @@ def build_parser() -> argparse.ArgumentParser:
     upload = sub.add_parser("ia-upload", help="Upload downloaded files with ia CLI; dry-run by default")
     upload.add_argument("--root", type=Path, default=Path("sba_corpus"))
     upload.add_argument("--limit", type=int)
-    upload.add_argument("--collection", default="AzimPremjiUniversity")
+    upload.add_argument("--collection", default=DEFAULT_IA_COLLECTION)
     upload.add_argument("--execute", action="store_true", help="Perform uploads")
     return parser
 

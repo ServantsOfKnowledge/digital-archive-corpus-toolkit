@@ -84,10 +84,19 @@ class SbaHarvesterTests(unittest.TestCase):
             )
             db.commit()
             db.close()
-            sba.make_ia_plan(db_path, output, None)
+            sba.make_ia_plan(db_path, output, sba.DEFAULT_IA_COLLECTION)
             plan = json.loads(output.read_text().strip())
-            self.assertEqual(plan["ia_identifier"], "apu.sba.1.1")
+            self.assertEqual(plan["ia_identifier"], "sba.1.1")
             self.assertEqual(plan["action"], "download_and_upload_candidate")
+            self.assertEqual(plan["metadata"]["collection"], "ServantsOfKnowledge")
+
+    def test_sba_identifier_and_legacy_identifier(self):
+        record = {"handle": "20.500.12497/12700"}
+        self.assertEqual(sba.sba_ia_identifier(record), "sba.12700.1")
+        self.assertEqual(
+            sba.sba_ia_identifier(record, sba.LEGACY_IA_IDENTIFIER_PREFIX),
+            "apu.sba.12700.1",
+        )
 
     def test_inventory_resumes_from_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -21,7 +21,7 @@ python3 sba_harvester.py status
 python3 sba_harvester.py status --json
 
 # Produce an IA plan; this does not download or upload anything
-python3 sba_harvester.py ia-plan --collection AzimPremjiUniversity
+python3 sba_harvester.py ia-plan
 
 # Preview or execute downloads for records without existing IA references
 python3 sba_harvester.py download --limit 10
@@ -42,9 +42,9 @@ All stages resume by default:
 - `ia-upload` skips locally recorded completed/previously-existing items. Interrupted uploads safely retry the same identifier with IA checksum verification, so already-received files are not uploaded again.
 - `--limit` applies to the next pending records rather than the first records in the collection.
 
-The adapter keeps download and upload operations behind explicit `--execute` flags. It checks both source metadata/file records and the intended IA identifier before uploading, and it never automatically deletes local files. The intended collection is `AzimPremjiUniversity`. Records containing an `archive.org` reference are classified as `skip_existing_ia_reference`.
+The adapter keeps download and upload operations behind explicit `--execute` flags. It checks both source metadata/file records and the intended IA identifier before uploading, and it never automatically deletes local files. SBA uploads go only to `ServantsOfKnowledge` by default. Records containing an `archive.org` reference are classified as `skip_existing_ia_reference`.
 
-New IA identifiers use the stable form `apu.sba.{handle-suffix}.1`, following the collection's existing `apu.*` convention rather than a title-derived identifier.
+New IA identifiers use the stable form `sba.{handle-suffix}.1`. Before upload, the adapter checks both the new identifier and the earlier `apu.sba.{handle-suffix}.1` form so an existing legacy item is not duplicated. Use `--collection` only when intentionally overriding the default collection.
 
 [SBA's published policy](https://schoolbooksarchive.azimpremjiuniversity.edu.in/DataPolicy.html) restricts robotic harvesting of full items. Only use `--execute` under the archival-partner authorization applicable to this project.
 
