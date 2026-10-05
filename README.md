@@ -48,6 +48,33 @@ New IA identifiers use the stable form `apu.sba.{handle-suffix}.1`, following th
 
 [SBA's published policy](https://schoolbooksarchive.azimpremjiuniversity.edu.in/DataPolicy.html) restricts robotic harvesting of full items. Only use `--execute` under the archival-partner authorization applicable to this project.
 
+## Anuvada Sampada sync adapter
+
+`anuvada_harvester.py` inventories [Anuvada Sampada](https://anuvadasampada.azimpremjiuniversity.edu.in/) through its OAI-PMH feed, enriches records from EPrints' JSON export, and compares every PDF with the current `AzimPremjiUniversity` collection before downloading anything. It preserves the existing identifiers: `apu.anuvadasampada.hin.{record}.{document}` for Hindi and `apu.anuvadasampada.kan.{record}` for Kannada.
+
+```bash
+# First run. All three stages resume safely after interruption.
+python3 anuvada_harvester.py inventory --full
+python3 anuvada_harvester.py enrich --workers 4
+python3 anuvada_harvester.py reconcile-ia
+
+# Confirm exactly what exists and what is missing.
+python3 anuvada_harvester.py status
+python3 anuvada_harvester.py export
+
+# Preview, then download only the PDFs classified as missing_on_ia.
+python3 anuvada_harvester.py download --limit 10
+python3 anuvada_harvester.py download --limit 10 --execute
+
+# Preview, then upload only downloaded records still absent from IA.
+python3 anuvada_harvester.py ia-upload --limit 10
+python3 anuvada_harvester.py ia-upload --limit 10 --execute
+```
+
+Future syncs use `python3 anuvada_harvester.py inventory` without `--full`; the saved OAI response timestamp limits the pass to changed records. If inventory stops midway, the next invocation starts from its saved OAI resumption token. Enrichment selects only new, changed, failed, or unfinished records; `enrich --refresh` starts a resumable full refresh. Export includes every source record, including deleted or metadata-only records without a PDF. Downloads validate EPrints' recorded size and MD5, retain `.part` files for HTTP Range resume, and keep successfully downloaded PDFs. Uploads recheck the intended IA identifier immediately before invoking the `ia` CLI.
+
+Run `reconcile-ia` before each download batch. It refreshes all matching IA items, then deduplicates by established identifier, exact source-file URL, and (only when unambiguous) source record ID. Both `download` and `ia-upload` are non-executing previews unless `--execute` is present.
+
 ## Scripts
 
 ### `tdl_downloader.py`

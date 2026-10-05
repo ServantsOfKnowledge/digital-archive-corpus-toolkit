@@ -3,6 +3,8 @@ tdl_corpus/
 tdl_verify/
 sba_data/
 sba_corpus/
+anuvada_data/
+anuvada_corpus/
 *.log
 *.tar.gz
 
