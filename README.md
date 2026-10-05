@@ -33,7 +33,7 @@ For a small verification run, add `--max-items 5` to `inventory` and `--limit 5`
 All stages resume by default:
 
 - `inventory` checkpoints the next source offset after every page. Use `--restart` only to begin a new full synchronization pass.
-- `enrich` selects only records with missing metadata or a recorded error unless `--refresh` is supplied.
+- `enrich` selects only records with missing metadata or a recorded error. `enrich --refresh` begins or resumes a checkpointed full refresh; after interruption, plain `enrich` continues that active refresh. Use `enrich --restart` only to discard that checkpoint and begin the full refresh again.
 - `download` selects the next incomplete records, checkpoints every completed file in each item's `manifest.json`, validates its saved byte size, and discards incomplete `.part` files before retrying.
 - `ia-upload` skips locally recorded completed/previously-existing items. Interrupted uploads safely retry the same identifier with IA checksum verification, so already-received files are not uploaded again.
 - `--limit` applies to the next pending records rather than the first records in the collection.

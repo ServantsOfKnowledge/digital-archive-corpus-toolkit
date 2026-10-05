@@ -169,6 +169,52 @@ class SbaHarvesterTests(unittest.TestCase):
             selected = mocked.call_args.args[0]
             self.assertEqual(selected["handle"], "20.500.12497/2")
 
+    def test_full_enrichment_refresh_resumes_on_plain_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "test.sqlite3"
+            db = sba.connect_db(db_path)
+            for number in range(1, 4):
+                db.execute(
+                    """INSERT INTO items
+                       (handle, uuid, source_url, title, type, date, list_json,
+                        metadata_json, bitstreams_json, ia_urls_json,
+                        ia_identifiers_json, classification, listed_at, enriched_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        f"20.500.12497/{number}", f"uuid-{number}",
+                        f"https://example/{number}", f"Title {number}", "Book", "2000", "{}",
+                        json.dumps({"Title": f"Old {number}"}), "[]", "[]", "[]",
+                        "download_candidate", sba.utc_now(), "2000-01-01T00:00:00+00:00",
+                    ),
+                )
+            db.commit()
+            db.close()
+
+            def refreshed(row):
+                return {
+                    "handle": row["handle"],
+                    "metadata": {"Title": "Refreshed"},
+                    "bitstreams": [], "ia_urls": [], "ia_identifiers": [],
+                    "classification": "download_candidate",
+                }
+
+            with patch.object(sba, "fetch_details", side_effect=refreshed):
+                sba.enrich(db_path, workers=1, limit=1, refresh=True)
+                db = sba.connect_db(db_path)
+                marker = sba.get_state(db, "enrich_refresh_started_at")
+                self.assertTrue(marker)
+                db.close()
+                sba.enrich(db_path, workers=1, limit=1, refresh=False)
+                sba.enrich(db_path, workers=1, limit=1, refresh=False)
+
+            db = sba.connect_db(db_path)
+            self.assertEqual(sba.get_state(db, "enrich_refresh_started_at"), "")
+            refreshed_count = db.execute(
+                "SELECT COUNT(*) FROM items WHERE metadata_json LIKE '%Refreshed%'"
+            ).fetchone()[0]
+            self.assertEqual(refreshed_count, 3)
+            db.close()
+
 
 if __name__ == "__main__":
     unittest.main()

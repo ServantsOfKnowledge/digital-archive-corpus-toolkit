@@ -574,16 +574,40 @@ def fetch_details(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def enrich(db_path: Path, workers: int, limit: int | None, refresh: bool) -> None:
+def enrich(
+    db_path: Path,
+    workers: int,
+    limit: int | None,
+    refresh: bool,
+    restart: bool = False,
+) -> None:
     with closing(connect_db(db_path)) as db:
-        where = "1=1" if refresh else "metadata_json IS NULL OR error IS NOT NULL"
-        sql = f"SELECT * FROM items WHERE {where} ORDER BY handle"
-        params: tuple[Any, ...] = ()
+        refresh_started_at = get_state(db, "enrich_refresh_started_at")
+        if restart or (refresh and not refresh_started_at):
+            refresh_started_at = utc_now()
+            set_state(db, "enrich_refresh_started_at", refresh_started_at)
+            db.commit()
+            logging.info("Started a new full enrichment refresh")
+        elif refresh_started_at:
+            logging.info("Resuming full enrichment refresh started at %s", refresh_started_at)
+
+        if refresh_started_at:
+            where = "enriched_at IS NULL OR enriched_at < ? OR error IS NOT NULL"
+            params: tuple[Any, ...] = (refresh_started_at,)
+        else:
+            where = "metadata_json IS NULL OR error IS NOT NULL"
+            params = ()
+        sql = f"SELECT * FROM items WHERE {where} ORDER BY (error IS NOT NULL), handle"
         if limit is not None:
             sql += " LIMIT ?"
-            params = (limit,)
+            params = (*params, limit)
         rows = db.execute(sql, params).fetchall()
         if not rows:
+            if refresh_started_at:
+                set_state(db, "enrich_refresh_started_at", "")
+                set_state(db, "last_enrichment_refresh_at", utc_now())
+                db.commit()
+                logging.info("Full enrichment refresh complete")
             logging.info("No records require enrichment")
             return
         done = 0
@@ -614,6 +638,18 @@ def enrich(db_path: Path, workers: int, limit: int | None, refresh: bool) -> Non
                 if done % 25 == 0 or done == len(rows):
                     db.commit()
                     logging.info("Enrichment: %s/%s records", done, len(rows))
+        if refresh_started_at:
+            remaining = db.execute(
+                f"SELECT COUNT(*) FROM items WHERE {where}",
+                (refresh_started_at,),
+            ).fetchone()[0]
+            if remaining == 0:
+                set_state(db, "enrich_refresh_started_at", "")
+                set_state(db, "last_enrichment_refresh_at", utc_now())
+                db.commit()
+                logging.info("Full enrichment refresh complete")
+            else:
+                logging.info("Full enrichment refresh checkpointed; %s records remain", remaining)
 
 
 def row_to_record(row: sqlite3.Row) -> dict[str, Any]:
@@ -742,7 +778,14 @@ def build_parser() -> argparse.ArgumentParser:
     enr = sub.add_parser("enrich", help="Fetch metadata and bitstream records; resumable")
     enr.add_argument("--workers", type=int, default=3)
     enr.add_argument("--limit", type=int, help="Development/testing limit")
-    enr.add_argument("--refresh", action="store_true", help="Refresh already enriched records")
+    enr.add_argument(
+        "--refresh", action="store_true",
+        help="Start or resume a full refresh; later plain enrich commands also resume it",
+    )
+    enr.add_argument(
+        "--restart", action="store_true",
+        help="Discard the current refresh checkpoint and start a new full refresh",
+    )
 
     exp = sub.add_parser("export", help="Export normalized JSONL and optional CSV")
     exp.add_argument("--jsonl", type=Path, default=Path("sba_data/sba_records.jsonl"))
@@ -776,7 +819,7 @@ def main() -> None:
     if args.command == "inventory":
         inventory(args.db, args.page_size, args.max_items, args.delay, args.restart)
     elif args.command == "enrich":
-        enrich(args.db, args.workers, args.limit, args.refresh)
+        enrich(args.db, args.workers, args.limit, args.refresh, args.restart)
     elif args.command == "export":
         export_records(args.db, args.jsonl, args.csv)
     elif args.command == "ia-plan":
