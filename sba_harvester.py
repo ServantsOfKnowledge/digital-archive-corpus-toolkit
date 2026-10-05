@@ -23,7 +23,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, unquote, urljoin, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -90,6 +90,12 @@ def detect_ia_references(*values: Any) -> tuple[list[str], list[str]]:
                 if match:
                     identifiers.add(match.group(1))
     return sorted(urls), sorted(identifiers)
+
+
+def is_direct_ia_pdf_url(url: str) -> bool:
+    parsed = urlparse(unquote(url))
+    hostname = (parsed.hostname or "").lower()
+    return hostname in {"archive.org", "www.archive.org"} and parsed.path.lower().endswith(".pdf")
 
 
 def extract_handle(item_url: str) -> str:
@@ -706,6 +712,93 @@ def export_records(db_path: Path, jsonl_path: Path, csv_path: Path | None) -> No
     logging.info("Exported %s records (%s)", len(records), counts)
 
 
+def collect_status(db_path: Path) -> dict[str, int]:
+    with closing(connect_db(db_path)) as db:
+        rows = db.execute("SELECT * FROM items ORDER BY handle").fetchall()
+        records = [row_to_record(row) for row in rows]
+        download_counts = {
+            row["status"]: row["count"]
+            for row in db.execute(
+                "SELECT status, COUNT(*) AS count FROM downloads GROUP BY status"
+            )
+        }
+        upload_counts = {
+            row["status"]: row["count"]
+            for row in db.execute(
+                "SELECT status, COUNT(*) AS count FROM ia_uploads GROUP BY status"
+            )
+        }
+
+    enriched = 0
+    errored = 0
+    ia_linked = 0
+    ia_metadata_source = 0
+    ia_bitstream_source = 0
+    direct_ia_pdf = 0
+    identifiers: set[str] = set()
+    for record in records:
+        if record["metadata"]:
+            enriched += 1
+        if record["error"]:
+            errored += 1
+        metadata_urls, metadata_ids = detect_ia_references(record["metadata"])
+        bitstream_urls, bitstream_ids = detect_ia_references(record["bitstreams"])
+        aggregate_urls = set(record["internet_archive_urls"])
+        aggregate_ids = set(record["internet_archive_identifiers"])
+        all_urls = aggregate_urls | set(metadata_urls) | set(bitstream_urls)
+        all_ids = aggregate_ids | set(metadata_ids) | set(bitstream_ids)
+        if all_urls or all_ids:
+            ia_linked += 1
+        if metadata_urls or metadata_ids:
+            ia_metadata_source += 1
+        if bitstream_urls or bitstream_ids:
+            ia_bitstream_source += 1
+        if any(is_direct_ia_pdf_url(url) for url in all_urls):
+            direct_ia_pdf += 1
+        identifiers.update(all_ids)
+
+    return {
+        "inventory_items": len(records),
+        "enriched_items": enriched,
+        "pending_enrichment_items": len(records) - enriched,
+        "enrichment_errors": errored,
+        "archive_org_linked_items": ia_linked,
+        "archive_org_metadata_source_items": ia_metadata_source,
+        "archive_org_bitstream_source_items": ia_bitstream_source,
+        "direct_archive_org_pdf_items": direct_ia_pdf,
+        "unique_archive_org_identifiers": len(identifiers),
+        "downloaded_files": download_counts.get("downloaded", 0),
+        "download_failures": download_counts.get("failed", 0),
+        "ia_uploaded_items": upload_counts.get("uploaded", 0),
+        "ia_upload_failures": upload_counts.get("failed", 0),
+    }
+
+
+def print_status(db_path: Path, json_output: bool = False) -> None:
+    stats = collect_status(db_path)
+    if json_output:
+        print(json.dumps(stats, indent=2, sort_keys=True))
+        return
+    labels = {
+        "inventory_items": "Inventory items",
+        "enriched_items": "Enriched items",
+        "pending_enrichment_items": "Pending enrichment",
+        "enrichment_errors": "Enrichment errors",
+        "archive_org_linked_items": "Any Archive.org-linked items",
+        "archive_org_metadata_source_items": "Archive.org in source metadata",
+        "archive_org_bitstream_source_items": "Archive.org in file records",
+        "direct_archive_org_pdf_items": "Direct Archive.org PDF items",
+        "unique_archive_org_identifiers": "Unique Archive.org identifiers",
+        "downloaded_files": "Downloaded files",
+        "download_failures": "Download failures",
+        "ia_uploaded_items": "IA uploaded items",
+        "ia_upload_failures": "IA upload failures",
+    }
+    width = max(len(label) for label in labels.values())
+    for key, label in labels.items():
+        print(f"{label:<{width}}  {stats[key]:>8,}")
+
+
 def first(metadata: dict[str, Any], *names: str, default: Any = "") -> Any:
     for name in names:
         value = metadata.get(name)
@@ -791,6 +884,9 @@ def build_parser() -> argparse.ArgumentParser:
     exp.add_argument("--jsonl", type=Path, default=Path("sba_data/sba_records.jsonl"))
     exp.add_argument("--csv", type=Path, default=Path("sba_data/sba_records.csv"))
 
+    status = sub.add_parser("status", help="Show harvest progress and Archive.org source counts")
+    status.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
     plan = sub.add_parser("ia-plan", help="Create a non-executing Internet Archive plan")
     plan.add_argument("--output", type=Path, default=Path("sba_data/ia_plan.jsonl"))
     plan.add_argument("--collection", help="IA collection, only if permission has been confirmed")
@@ -822,6 +918,8 @@ def main() -> None:
         enrich(args.db, args.workers, args.limit, args.refresh, args.restart)
     elif args.command == "export":
         export_records(args.db, args.jsonl, args.csv)
+    elif args.command == "status":
+        print_status(args.db, args.json)
     elif args.command == "ia-plan":
         make_ia_plan(args.db, args.output, args.collection)
     elif args.command == "download":

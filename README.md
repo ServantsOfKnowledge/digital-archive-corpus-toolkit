@@ -16,6 +16,10 @@ python3 sba_harvester.py enrich --workers 3
 # Export normalized records
 python3 sba_harvester.py export
 
+# Show progress and Archive.org source/PDF counts
+python3 sba_harvester.py status
+python3 sba_harvester.py status --json
+
 # Produce an IA plan; this does not download or upload anything
 python3 sba_harvester.py ia-plan --collection AzimPremjiUniversity
 

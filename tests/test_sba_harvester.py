@@ -36,6 +36,13 @@ class SbaHarvesterTests(unittest.TestCase):
         self.assertEqual(identifiers, ["example-book"])
         self.assertEqual(len(urls), 2)
 
+    def test_direct_ia_pdf_url(self):
+        self.assertTrue(sba.is_direct_ia_pdf_url(
+            "https://archive.org/download/example/book%20one.pdf?download=1"
+        ))
+        self.assertFalse(sba.is_direct_ia_pdf_url("https://archive.org/details/example"))
+        self.assertFalse(sba.is_direct_ia_pdf_url("https://example.org/book.pdf"))
+
     def test_normalize_bitstreams_records_stable_viewer_url(self):
         rows = sba.normalize_bitstreams(
             "20.500.12497/1",
@@ -214,6 +221,53 @@ class SbaHarvesterTests(unittest.TestCase):
             ).fetchone()[0]
             self.assertEqual(refreshed_count, 3)
             db.close()
+
+    def test_status_separates_metadata_and_direct_pdf_sources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "test.sqlite3"
+            db = sba.connect_db(db_path)
+            fixtures = [
+                (
+                    1,
+                    {"Source Website URL": "https://archive.org/details/source-one"},
+                    [],
+                    ["https://archive.org/details/source-one"],
+                    ["source-one"],
+                ),
+                (
+                    2,
+                    {"Title": "Second"},
+                    [{"uri": "https://archive.org/download/source-two/book.pdf"}],
+                    ["https://archive.org/download/source-two/book.pdf"],
+                    ["source-two"],
+                ),
+                (3, None, [], [], []),
+            ]
+            for number, metadata, bitstreams, urls, identifiers in fixtures:
+                db.execute(
+                    """INSERT INTO items
+                       (handle, uuid, source_url, title, type, date, list_json,
+                        metadata_json, bitstreams_json, ia_urls_json,
+                        ia_identifiers_json, classification, listed_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        f"20.500.12497/{number}", f"uuid-{number}",
+                        f"https://example/{number}", f"Title {number}", "Book", "2000", "{}",
+                        json.dumps(metadata) if metadata is not None else None,
+                        json.dumps(bitstreams), json.dumps(urls), json.dumps(identifiers),
+                        "record_only_ia_linked" if urls else "metadata_pending", sba.utc_now(),
+                    ),
+                )
+            db.commit()
+            db.close()
+            stats = sba.collect_status(db_path)
+            self.assertEqual(stats["inventory_items"], 3)
+            self.assertEqual(stats["enriched_items"], 2)
+            self.assertEqual(stats["archive_org_linked_items"], 2)
+            self.assertEqual(stats["archive_org_metadata_source_items"], 1)
+            self.assertEqual(stats["archive_org_bitstream_source_items"], 1)
+            self.assertEqual(stats["direct_archive_org_pdf_items"], 1)
+            self.assertEqual(stats["unique_archive_org_identifiers"], 2)
 
 
 if __name__ == "__main__":
