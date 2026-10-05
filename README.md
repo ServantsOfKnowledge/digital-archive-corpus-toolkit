@@ -30,6 +30,14 @@ python3 sba_harvester.py ia-upload --limit 10 --execute
 
 For a small verification run, add `--max-items 5` to `inventory` and `--limit 5` to `enrich`.
 
+All stages resume by default:
+
+- `inventory` checkpoints the next source offset after every page. Use `--restart` only to begin a new full synchronization pass.
+- `enrich` selects only records with missing metadata or a recorded error unless `--refresh` is supplied.
+- `download` selects the next incomplete records, checkpoints every completed file in each item's `manifest.json`, validates its saved byte size, and discards incomplete `.part` files before retrying.
+- `ia-upload` skips locally recorded completed/previously-existing items. Interrupted uploads safely retry the same identifier with IA checksum verification, so already-received files are not uploaded again.
+- `--limit` applies to the next pending records rather than the first records in the collection.
+
 The adapter keeps download and upload operations behind explicit `--execute` flags. It checks both source metadata/file records and the intended IA identifier before uploading, and it never automatically deletes local files. The intended collection is `AzimPremjiUniversity`. Records containing an `archive.org` reference are classified as `skip_existing_ia_reference`.
 
 New IA identifiers use the stable form `apu.sba.{handle-suffix}.1`, following the collection's existing `apu.*` convention rather than a title-derived identifier.

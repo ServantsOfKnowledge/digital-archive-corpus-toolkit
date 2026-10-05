@@ -175,12 +175,31 @@ def connect_db(path: Path) -> sqlite3.Connection:
     return db
 
 
-def inventory(db_path: Path, page_size: int, max_items: int | None, delay: float) -> None:
-    listed_at = utc_now()
-    start = 0
+def get_state(db: sqlite3.Connection, key: str, default: str | None = None) -> str | None:
+    row = db.execute("SELECT value FROM sync_state WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_state(db: sqlite3.Connection, key: str, value: Any) -> None:
+    db.execute(
+        "INSERT OR REPLACE INTO sync_state(key, value) VALUES(?, ?)",
+        (key, str(value)),
+    )
+
+
+def inventory(
+    db_path: Path, page_size: int, max_items: int | None, delay: float, restart: bool = False
+) -> None:
     seen = 0
     expected = None
     with closing(connect_db(db_path)) as db:
+        start = 0 if restart else int(get_state(db, "inventory_next_start", "0") or 0)
+        listed_at = get_state(db, "inventory_run_started_at") if start else None
+        if not listed_at:
+            listed_at = utc_now()
+            set_state(db, "inventory_run_started_at", listed_at)
+        if start:
+            logging.info("Resuming inventory at source offset %s", start)
         while expected is None or start < expected:
             limit = page_size
             if max_items is not None:
@@ -216,20 +235,20 @@ def inventory(db_path: Path, page_size: int, max_items: int | None, delay: float
                 )
             seen += len(rows)
             start += len(rows)
-            db.execute(
-                "INSERT OR REPLACE INTO sync_state(key, value) VALUES('source_inventory_size', ?)",
-                (str(expected),),
-            )
-            db.execute(
-                "INSERT OR REPLACE INTO sync_state(key, value) VALUES('last_inventory_at', ?)",
-                (listed_at,),
-            )
+            set_state(db, "source_inventory_size", expected)
+            set_state(db, "inventory_next_start", start)
             db.commit()
-            logging.info("Inventory: %s/%s records", seen, expected)
+            logging.info("Inventory: fetched %s this run; source offset %s/%s", seen, start, expected)
             if len(rows) < limit:
                 break
             if delay:
                 time.sleep(delay)
+        if expected is not None and start >= expected:
+            set_state(db, "inventory_next_start", 0)
+            set_state(db, "last_inventory_at", utc_now())
+            set_state(db, "inventory_run_started_at", "")
+            db.commit()
+            logging.info("Inventory snapshot complete: %s source records", expected)
 
 
 def normalize_bitstreams(handle: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -269,18 +288,81 @@ def write_json_atomic(path: Path, value: Any) -> None:
     temp.replace(path)
 
 
+def load_manifest(folder: Path) -> dict[str, Any]:
+    manifest = folder / "manifest.json"
+    if not manifest.exists():
+        return {"complete": False, "files": []}
+    try:
+        value = json.loads(manifest.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {"complete": False, "files": []}
+    except (OSError, ValueError, TypeError):
+        return {"complete": False, "files": []}
+
+
+def load_manifest_states(folder: Path) -> dict[str, dict[str, Any]]:
+    return {
+        str(item["bitstream_id"]): item
+        for item in load_manifest(folder).get("files", [])
+        if item.get("bitstream_id")
+    }
+
+
+def state_file_is_complete(state: dict[str, Any]) -> bool:
+    if state.get("status") not in {"downloaded", "already_downloaded"}:
+        return False
+    path_value = state.get("path")
+    if not path_value:
+        return False
+    path = Path(path_value)
+    if not path.is_file():
+        return False
+    recorded_size = int(state.get("size") or 0)
+    return recorded_size > 0 and path.stat().st_size == recorded_size
+
+
+def record_download_is_complete(record: dict[str, Any], root: Path) -> bool:
+    if record["classification"] == "record_only_ia_linked":
+        return True
+    required = [
+        str(item.get("internal_id", ""))
+        for item in record["bitstreams"]
+        if item.get("internal_id") and not item.get("islock")
+    ]
+    folder = item_directory(root, record)
+    manifest = load_manifest(folder)
+    if not manifest.get("complete"):
+        return False
+    if not required:
+        return True
+    states = load_manifest_states(folder)
+    return all(state_file_is_complete(states.get(bitstream_id, {})) for bitstream_id in required)
+
+
 def download_one(record: dict[str, Any], root: Path, execute: bool) -> list[dict[str, Any]]:
     if record["classification"] == "record_only_ia_linked":
         return [{"status": "skipped_existing_ia_reference", "handle": record["handle"]}]
     fresh = get_json("/dspace-mvc/getItemBitstreamViewer", {"handle": record["handle"]})
     bitstreams = normalize_bitstreams(record["handle"], fresh)
     folder = item_directory(root, record)
+    previous = load_manifest_states(folder)
     planned = []
+
+    def checkpoint() -> None:
+        merged = dict(previous)
+        merged.update({state["bitstream_id"]: state for state in planned if state.get("bitstream_id")})
+        write_json_atomic(
+            folder / "manifest.json",
+            {"complete": False, "files": list(merged.values()), "updated_at": utc_now()},
+        )
+
     for bitstream in bitstreams:
         state = {
             "handle": record["handle"],
             "bitstream_id": str(bitstream.get("internal_id", "")),
-            "name": safe_component(str(bitstream.get("name") or "file.bin")),
+            "name": (
+                f"{int(bitstream.get('sequenceId') or 0):03d}_"
+                f"{safe_component(str(bitstream.get('name') or 'file.bin'))}"
+            ),
             "download_url": bitstream.get("download_url"),
             "status": "planned",
         }
@@ -293,8 +375,11 @@ def download_one(record: dict[str, Any], root: Path, execute: bool) -> list[dict
         folder.mkdir(parents=True, exist_ok=True)
         destination = folder / state["name"]
         partial = destination.with_suffix(destination.suffix + ".part")
-        if destination.exists() and destination.stat().st_size > 0:
-            state.update(status="already_downloaded", path=str(destination), size=destination.stat().st_size)
+        old_state = previous.get(state["bitstream_id"], {})
+        if state_file_is_complete(old_state):
+            state.update(old_state)
+            state["status"] = "already_downloaded"
+            checkpoint()
             continue
         digest = hashlib.sha256()
         response = session().get(bitstream["download_url"], stream=True, timeout=(30, 600))
@@ -311,14 +396,21 @@ def download_one(record: dict[str, Any], root: Path, execute: bool) -> list[dict
             if expected and size != expected:
                 raise IOError(f"size mismatch: received {size}, expected {expected}")
             partial.replace(destination)
-            state.update(status="downloaded", path=str(destination), size=size, sha256=digest.hexdigest())
+            state.update(
+                status="downloaded", path=str(destination.resolve()),
+                size=size, sha256=digest.hexdigest(),
+            )
+            checkpoint()
         except Exception:
             partial.unlink(missing_ok=True)
             raise
     if execute:
         write_json_atomic(folder / "metadata.json", ia_metadata(record, "AzimPremjiUniversity"))
         write_json_atomic(folder / "source_record.json", record)
-        write_json_atomic(folder / "manifest.json", {"files": planned, "updated_at": utc_now()})
+        write_json_atomic(
+            folder / "manifest.json",
+            {"complete": True, "files": planned, "updated_at": utc_now()},
+        )
     return planned
 
 
@@ -326,14 +418,17 @@ def download_records(
     db_path: Path, root: Path, workers: int, limit: int | None, execute: bool
 ) -> None:
     with closing(connect_db(db_path)) as db:
-        sql = "SELECT * FROM items WHERE metadata_json IS NOT NULL ORDER BY handle"
-        params: tuple[Any, ...] = ()
+        rows = db.execute(
+            "SELECT * FROM items WHERE metadata_json IS NOT NULL ORDER BY handle"
+        ).fetchall()
+        records = [
+            record for record in (row_to_record(row) for row in rows)
+            if not record_download_is_complete(record, root)
+        ]
         if limit is not None:
-            sql += " LIMIT ?"
-            params = (limit,)
-        records = [row_to_record(row) for row in db.execute(sql, params).fetchall()]
+            records = records[:limit]
         if not records:
-            logging.info("No enriched records available")
+            logging.info("No incomplete enriched records available")
             return
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {pool.submit(download_one, record, root, execute): record for record in records}
@@ -391,46 +486,64 @@ def upload_records(
     db_path: Path, root: Path, limit: int | None, execute: bool, collection: str
 ) -> None:
     with closing(connect_db(db_path)) as db:
-        sql = "SELECT * FROM items WHERE metadata_json IS NOT NULL ORDER BY handle"
-        params: tuple[Any, ...] = ()
-        if limit is not None:
-            sql += " LIMIT ?"
-            params = (limit,)
-        for row in db.execute(sql, params).fetchall():
+        terminal = {"uploaded", "already_on_ia", "skipped_existing_ia_reference"}
+        completed = {
+            row["handle"]: row["status"]
+            for row in db.execute("SELECT handle, status FROM ia_uploads")
+            if row["status"] in terminal
+        }
+        rows = db.execute(
+            "SELECT * FROM items WHERE metadata_json IS NOT NULL ORDER BY handle"
+        ).fetchall()
+        candidates: list[tuple[dict[str, Any], list[Path]]] = []
+        for row in rows:
             record = row_to_record(row)
+            if record["handle"] in completed:
+                continue
             identifier = "apu.sba." + record["handle"].split("/")[-1] + ".1"
-            error = None
             if record["internet_archive_identifiers"] or record["internet_archive_urls"]:
                 logging.info("%s: skip; source already references IA", record["handle"])
-                status = "skipped_existing_ia_reference"
-            elif ia_exists(identifier):
+                db.execute(
+                    "INSERT OR REPLACE INTO ia_uploads VALUES (?, ?, ?, NULL, ?)",
+                    (record["handle"], identifier, "skipped_existing_ia_reference", utc_now()),
+                )
+                continue
+            folder = item_directory(root, record)
+            files = sorted(
+                path for path in folder.iterdir()
+                if path.is_file() and path.name not in {"metadata.json", "manifest.json", "source_record.json"}
+            ) if folder.exists() else []
+            if not files or not record_download_is_complete(record, root):
+                continue
+            candidates.append((record, files))
+        db.commit()
+        if limit is not None:
+            candidates = candidates[:limit]
+        if not candidates:
+            logging.info("No downloaded records remain to upload")
+            return
+        for record, files in candidates:
+            identifier = "apu.sba." + record["handle"].split("/")[-1] + ".1"
+            error = None
+            if ia_exists(identifier):
                 logging.info("%s: skip; %s already exists", record["handle"], identifier)
                 status = "already_on_ia"
+            elif not execute:
+                logging.info("%s: would upload %s files as %s", record["handle"], len(files), identifier)
+                status = "planned"
             else:
-                folder = item_directory(root, record)
-                files = sorted(
-                    path for path in folder.iterdir()
-                    if path.is_file() and path.name not in {"metadata.json", "manifest.json", "source_record.json"}
-                ) if folder.exists() else []
-                if not files:
-                    logging.info("%s: no downloaded files", record["handle"])
-                    status = "files_missing"
-                elif not execute:
-                    logging.info("%s: would upload %s files as %s", record["handle"], len(files), identifier)
-                    status = "planned"
+                command = [
+                    "ia", "upload", identifier, *map(str, files),
+                    *metadata_flags(ia_metadata(record, collection)), "--checksum", "--verify",
+                ]
+                result = subprocess.run(command, capture_output=True, text=True, timeout=7200)
+                if result.returncode:
+                    status = "failed"
+                    error = (result.stderr or result.stdout).strip()
+                    logging.error("%s: %s", identifier, error)
                 else:
-                    command = [
-                        "ia", "upload", identifier, *map(str, files),
-                        *metadata_flags(ia_metadata(record, collection)), "--checksum", "--verify",
-                    ]
-                    result = subprocess.run(command, capture_output=True, text=True, timeout=7200)
-                    if result.returncode:
-                        status = "failed"
-                        error = (result.stderr or result.stdout).strip()
-                        logging.error("%s: %s", identifier, error)
-                    else:
-                        status = "uploaded"
-                        logging.info("%s: uploaded", identifier)
+                    status = "uploaded"
+                    logging.info("%s: uploaded", identifier)
             db.execute(
                 "INSERT OR REPLACE INTO ia_uploads VALUES (?, ?, ?, ?, ?)",
                 (record["handle"], identifier, status, error, utc_now()),
@@ -624,6 +737,7 @@ def build_parser() -> argparse.ArgumentParser:
     inv.add_argument("--page-size", type=int, default=120, choices=range(1, 121), metavar="1..120")
     inv.add_argument("--max-items", type=int, help="Development/testing limit")
     inv.add_argument("--delay", type=float, default=0.25, help="Delay between listing pages")
+    inv.add_argument("--restart", action="store_true", help="Start a fresh inventory pass at offset zero")
 
     enr = sub.add_parser("enrich", help="Fetch metadata and bitstream records; resumable")
     enr.add_argument("--workers", type=int, default=3)
@@ -660,7 +774,7 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(message)s",
     )
     if args.command == "inventory":
-        inventory(args.db, args.page_size, args.max_items, args.delay)
+        inventory(args.db, args.page_size, args.max_items, args.delay, args.restart)
     elif args.command == "enrich":
         enrich(args.db, args.workers, args.limit, args.refresh)
     elif args.command == "export":
