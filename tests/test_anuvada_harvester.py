@@ -211,10 +211,21 @@ class AnuvadaHarvesterTests(unittest.TestCase):
             response = Mock(status_code=206)
             response.raise_for_status.return_value = None
             response.iter_content.return_value = [b"def"]
-            with patch.object(ah, "session") as mocked:
+            refreshed = {
+                "documents": [{
+                    "document_number": 1,
+                    "source_url": "https://source/1/1/A.pdf",
+                    "expected_size": 6,
+                    "source_md5": hashlib.md5(b"abcdef").hexdigest(),
+                }]
+            }
+            with patch.object(ah, "fetch_enrichment", return_value=refreshed), patch.object(ah, "session") as mocked:
                 mocked.return_value.get.return_value = response
                 result = ah.download_one(root, row, execute=True)
-            self.assertEqual(mocked.return_value.get.call_args.kwargs["headers"], {"Range": "bytes=3-"})
+            headers = mocked.return_value.get.call_args.kwargs["headers"]
+            self.assertEqual(headers["Range"], "bytes=3-")
+            self.assertEqual(headers["Referer"], ah.BASE_URL + "/1/")
+            self.assertIn("application/pdf", headers["Accept"])
             self.assertEqual(destination.read_bytes(), b"abcdef")
             self.assertEqual(result["status"], "downloaded")
             db.close()
@@ -250,6 +261,42 @@ class AnuvadaHarvesterTests(unittest.TestCase):
                 result = ah.download_one(root, row, execute=True)
             self.assertEqual(result["status"], "source_unavailable")
             self.assertEqual(result["expected_size"], 0)
+            db.close()
+
+    def test_canonical_404_is_classified_source_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = ah.connect_db(root / "test.sqlite3")
+            db.execute(
+                """INSERT INTO items
+                   (record_id,oai_identifier,datestamp,deleted,dc_json,source_url,listed_at)
+                   VALUES(956,'oai:x:956','2024',0,'{}','https://source/956/',?)""",
+                (ah.utc_now(),),
+            )
+            db.execute(
+                """INSERT INTO documents
+                   (record_id,document_number,filename,source_url,expected_size,source_md5,
+                    ia_identifier,classification,updated_at)
+                   VALUES(956,1,'Missing.pdf','https://source/956/1/Missing.pdf',10,'abc',
+                          'apu.anuvadasampada.hin.956.1','missing_ia',?)""",
+                (ah.utc_now(),),
+            )
+            row = db.execute("SELECT * FROM documents").fetchone()
+            refreshed = {
+                "documents": [{
+                    "document_number": 1,
+                    "source_url": "https://source/956/1/Missing.pdf",
+                    "expected_size": 10,
+                    "source_md5": "abc",
+                }]
+            }
+            response = Mock(status_code=404)
+            response.raise_for_status.side_effect = ah.requests.HTTPError(response=response)
+            with patch.object(ah, "fetch_enrichment", return_value=refreshed), patch.object(ah, "session") as mocked:
+                mocked.return_value.get.return_value = response
+                result = ah.download_one(root, row, execute=True)
+            self.assertEqual(result["status"], "source_unavailable")
+            self.assertIn("404", result["error"])
             db.close()
 
     def test_ia_metadata_supports_both_default_collections(self):

@@ -547,9 +547,10 @@ def download_one(root: Path, row: sqlite3.Row, execute: bool) -> dict[str, Any]:
             "error": "EPrints reports an empty source file (0 bytes / empty MD5)",
         }
     source_url = row["source_url"]
-    # Older database rows did not preserve EPrints' reported zero size. If a
-    # download already failed, refresh just this record before another retry.
-    if row["download_status"] == "failed":
+    # Always refresh the selected document. Older databases did not preserve
+    # EPrints' reported zero size, and this also avoids downloading a stale or
+    # reconstructed URL when the repository has changed its file metadata.
+    try:
         refreshed = fetch_enrichment(row["record_id"])
         current = next(
             (
@@ -569,14 +570,32 @@ def download_one(root: Path, row: sqlite3.Row, execute: bool) -> dict[str, Any]:
             }
         if current:
             source_url = current["source_url"]
+    except Exception as exc:
+        # Metadata refresh failure should not mask a still-working saved URL.
+        logging.warning("%s: source metadata preflight failed: %s", row["record_id"], exc)
     destination.parent.mkdir(parents=True, exist_ok=True)
     partial = destination.with_suffix(destination.suffix + ".part")
     digest = hashlib.sha256()
     md5 = hashlib.md5()
     partial_size = partial.stat().st_size if partial.exists() else 0
-    headers = {"Range": f"bytes={partial_size}-"} if partial_size else {}
+    headers = {
+        "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
+        "Referer": f"{BASE_URL}/{row['record_id']}/",
+    }
+    if partial_size:
+        headers["Range"] = f"bytes={partial_size}-"
     response = session().get(source_url, headers=headers, stream=True, timeout=(30, 900))
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError:
+        if response.status_code == 404:
+            return {
+                **result,
+                "status": "source_unavailable",
+                "error": "Canonical EPrints file URL returns HTTP 404",
+                "source_url": source_url,
+            }
+        raise
     resumed = partial_size > 0 and response.status_code == 206
     if resumed:
         with partial.open("rb") as existing:
