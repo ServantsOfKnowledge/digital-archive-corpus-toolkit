@@ -67,13 +67,14 @@ python3 anuvada_harvester.py download --limit 10
 python3 anuvada_harvester.py download --limit 10 --execute
 
 # Preview, then upload only downloaded records still absent from IA.
+# New items go to both AzimPremjiUniversity and ServantsOfKnowledge.
 python3 anuvada_harvester.py ia-upload --limit 10
 python3 anuvada_harvester.py ia-upload --limit 10 --execute
 ```
 
 Future syncs use `python3 anuvada_harvester.py inventory` without `--full`; the saved OAI response timestamp limits the pass to changed records. If inventory stops midway, the next invocation starts from its saved OAI resumption token. Enrichment selects only new, changed, failed, or unfinished records; `enrich --refresh` starts a resumable full refresh. Export includes every source record, including deleted or metadata-only records without a PDF. Downloads validate EPrints' recorded size and MD5, retain `.part` files for HTTP Range resume, and keep successfully downloaded PDFs. Uploads recheck the intended IA identifier immediately before invoking the `ia` CLI.
 
-Run `reconcile-ia` before each download batch. It refreshes all matching IA items, then deduplicates by established identifier, exact source-file URL, and (only when unambiguous) source record ID. Both `download` and `ia-upload` are non-executing previews unless `--execute` is present.
+Run `reconcile-ia` before each download batch. It refreshes all matching IA items, then deduplicates by established identifier, exact source-file URL, and (only when unambiguous) source record ID. Both `download` and `ia-upload` are non-executing previews unless `--execute` is present. Uploads include both `AzimPremjiUniversity` and `ServantsOfKnowledge` collection metadata by default. To override the defaults, repeat the option as needed, for example `--collection AzimPremjiUniversity --collection ServantsOfKnowledge`.
 
 ## Scripts
 

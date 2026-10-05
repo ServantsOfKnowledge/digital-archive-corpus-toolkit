@@ -200,6 +200,38 @@ class AnuvadaHarvesterTests(unittest.TestCase):
             self.assertEqual(result["status"], "downloaded")
             db.close()
 
+    def test_ia_metadata_supports_both_default_collections(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = ah.connect_db(Path(directory) / "test.sqlite3")
+            db.execute(
+                """INSERT INTO items
+                   (record_id,oai_identifier,datestamp,deleted,dc_json,metadata_json,
+                    language,source_url,enriched_datestamp,listed_at)
+                   VALUES(1,'oai:x:1','2024',0,'{}',?,'hin','https://source/1/','2024',?)""",
+                (json.dumps({"title": "Title"}), ah.utc_now()),
+            )
+            db.execute(
+                """INSERT INTO documents
+                   (record_id,document_number,filename,source_url,ia_identifier,
+                    classification,updated_at)
+                   VALUES(1,1,'A.pdf','https://source/1/1/A.pdf',
+                          'apu.anuvadasampada.hin.1.1','missing_ia',?)""",
+                (ah.utc_now(),),
+            )
+            item = db.execute("SELECT * FROM items").fetchone()
+            document = db.execute("SELECT * FROM documents").fetchone()
+            metadata = ah.ia_metadata(
+                item, document, ["AzimPremjiUniversity", "ServantsOfKnowledge"]
+            )
+            self.assertEqual(
+                metadata["collection"],
+                ["AzimPremjiUniversity", "ServantsOfKnowledge"],
+            )
+            flags = ah.metadata_arguments(metadata)
+            self.assertIn("--metadata=collection:AzimPremjiUniversity", flags)
+            self.assertIn("--metadata=collection:ServantsOfKnowledge", flags)
+            db.close()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -607,12 +607,14 @@ def creators(metadata: dict[str, Any]) -> list[str]:
     return result
 
 
-def ia_metadata(item: sqlite3.Row, document: sqlite3.Row, collection: str) -> dict[str, Any]:
+def ia_metadata(
+    item: sqlite3.Row, document: sqlite3.Row, collections: list[str]
+) -> dict[str, Any]:
     metadata = json.loads(item["metadata_json"] or "{}")
     subject = list(metadata.get("subjects") or [])
     subject.extend(["Anuvada Sampada", "Azim Premji University"])
     result = {
-        "collection": collection,
+        "collection": collections,
         "title": metadata.get("title"),
         "creator": creators(metadata),
         "date": metadata.get("date"),
@@ -644,7 +646,9 @@ def metadata_arguments(metadata: dict[str, Any]) -> list[str]:
     return result
 
 
-def upload(db_path: Path, limit: int | None, collection: str, execute: bool) -> None:
+def upload(
+    db_path: Path, limit: int | None, collections: list[str], execute: bool
+) -> None:
     with closing(connect_db(db_path)) as db:
         rows = db.execute(
             """SELECT d.*,i.metadata_json,i.language,i.source_url AS item_source_url,
@@ -674,7 +678,7 @@ def upload(db_path: Path, limit: int | None, collection: str, execute: bool) -> 
                 item = db.execute("SELECT * FROM items WHERE record_id=?", (row["record_id"],)).fetchone()
                 command = [
                     "ia", "upload", identifier, row["path"],
-                    *metadata_arguments(ia_metadata(item, row, collection)),
+                    *metadata_arguments(ia_metadata(item, row, collections)),
                     "--checksum", "--verify",
                 ]
                 if not execute:
@@ -798,7 +802,15 @@ def build_parser() -> argparse.ArgumentParser:
     dl.add_argument("--execute", action="store_true")
 
     up = commands.add_parser("ia-upload", help="Upload downloaded missing PDFs; preview by default")
-    up.add_argument("--collection", default="AzimPremjiUniversity")
+    up.add_argument(
+        "--collection",
+        action="append",
+        dest="collections",
+        help=(
+            "IA collection; repeat for more than one. Defaults to "
+            "AzimPremjiUniversity and ServantsOfKnowledge"
+        ),
+    )
     up.add_argument("--limit", type=int)
     up.add_argument("--execute", action="store_true")
 
@@ -826,7 +838,8 @@ def main() -> None:
     elif args.command == "download":
         download(args.db, args.root, args.workers, args.limit, args.execute)
     elif args.command == "ia-upload":
-        upload(args.db, args.limit, args.collection, args.execute)
+        collections = args.collections or ["AzimPremjiUniversity", "ServantsOfKnowledge"]
+        upload(args.db, args.limit, collections, args.execute)
     elif args.command == "export":
         export(args.db, args.jsonl, args.csv)
 
