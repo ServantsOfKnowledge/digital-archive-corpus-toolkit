@@ -397,7 +397,15 @@ def download_one(record: dict[str, Any], root: Path, execute: bool) -> list[dict
             checkpoint()
             continue
         digest = hashlib.sha256()
-        response = session().get(bitstream["download_url"], stream=True, timeout=(30, 600))
+        # The SBA bitstream endpoint returns HTTP 406 for JSON- or PDF-specific
+        # Accept headers. It serves the file only for the browser-compatible
+        # wildcard value, so override the JSON default used by API calls.
+        response = session().get(
+            bitstream["download_url"],
+            headers={"Accept": "*/*", "Referer": record["source_url"]},
+            stream=True,
+            timeout=(30, 600),
+        )
         response.raise_for_status()
         expected = int(response.headers.get("Content-Length") or 0)
         size = 0

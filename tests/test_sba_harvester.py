@@ -65,6 +65,35 @@ class SbaHarvesterTests(unittest.TestCase):
             sba.BASE_URL + "/dspace-mvc/bitstreamView?bitstream=abc&Type=application/pdf",
         )
 
+    def test_download_uses_sba_compatible_accept_header(self):
+        with tempfile.TemporaryDirectory() as directory:
+            record = {
+                "handle": "20.500.12497/1",
+                "source_url": sba.BASE_URL + "/handle/20.500.12497/1",
+                "title": "Title",
+                "date": "2000",
+                "classification": "download_candidate",
+                "metadata": {"Title": "Title"},
+            }
+            payload = {"data": [{
+                "name": "A.pdf", "internal_id": "abc", "sequenceId": 1,
+                "islock": False,
+                "html": '<iframe value=/dspace-mvc/bitstreamView?bitstream=abc&Type=application/pdf></iframe>',
+            }]}
+            response = Mock()
+            response.headers = {"Content-Length": "3"}
+            response.raise_for_status.return_value = None
+            response.iter_content.return_value = [b"PDF"]
+            with patch.object(sba, "get_json", return_value=payload), patch.object(
+                sba, "session"
+            ) as mocked:
+                mocked.return_value.get.return_value = response
+                states = sba.download_one(record, Path(directory), execute=True)
+            request = mocked.return_value.get.call_args
+            self.assertEqual(request.kwargs["headers"]["Accept"], "*/*")
+            self.assertEqual(request.kwargs["headers"]["Referer"], record["source_url"])
+            self.assertEqual(states[0]["status"], "downloaded")
+
     def test_schema_and_ia_plan_classification(self):
         with tempfile.TemporaryDirectory() as directory:
             db_path = Path(directory) / "test.sqlite3"
