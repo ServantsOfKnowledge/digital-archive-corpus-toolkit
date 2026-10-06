@@ -3,7 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import sba_harvester as sba
 
@@ -97,6 +97,38 @@ class SbaHarvesterTests(unittest.TestCase):
             sba.sba_ia_identifier(record, sba.LEGACY_IA_IDENTIFIER_PREFIX),
             "apu.sba.12700.1",
         )
+
+    def test_find_existing_ia_item_by_source_provenance(self):
+        record = {
+            "handle": "20.500.12497/12700",
+            "source_url": "https://schoolbooksarchive.azimpremjiuniversity.edu.in/handle/20.500.12497/12700",
+        }
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "response": {"docs": [{"identifier": "older-custom-identifier"}]}
+        }
+        with patch.object(sba, "ia_exists", side_effect=[False, False]), patch.object(
+            sba, "session"
+        ) as mocked:
+            mocked.return_value.get.return_value = response
+            existing = sba.find_existing_ia_item(record)
+        self.assertEqual(existing, "older-custom-identifier")
+        params = mocked.return_value.get.call_args.kwargs["params"]
+        self.assertIn('originalurl:"https://schoolbooksarchive', params["q"])
+        self.assertIn('identifier-access:"20.500.12497/12700"', params["q"])
+
+    def test_find_existing_ia_item_prefers_identifier_without_search(self):
+        record = {
+            "handle": "20.500.12497/12700",
+            "source_url": "https://example/handle/20.500.12497/12700",
+        }
+        with patch.object(sba, "ia_exists", return_value=True), patch.object(
+            sba, "session"
+        ) as mocked:
+            existing = sba.find_existing_ia_item(record)
+        self.assertEqual(existing, "sba.12700.1")
+        mocked.assert_not_called()
 
     def test_inventory_resumes_from_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:

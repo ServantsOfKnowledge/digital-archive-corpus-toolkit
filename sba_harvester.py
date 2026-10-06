@@ -35,6 +35,8 @@ POLICY_URL = f"{BASE_URL}/DataPolicy.html"
 DEFAULT_IA_COLLECTION = "ServantsOfKnowledge"
 IA_IDENTIFIER_PREFIX = "sba"
 LEGACY_IA_IDENTIFIER_PREFIX = "apu.sba"
+IA_METADATA_URL = "https://archive.org/metadata/"
+IA_SEARCH_URL = "https://archive.org/advancedsearch.php"
 USER_AGENT = "ServantsOfKnowledge-SBA-Metadata-Harvester/1.0 (+https://github.com/ServantsOfKnowledge/digital-archive-corpus-toolkit)"
 IA_URL_RE = re.compile(
     r"https?://(?:www\.)?(?:archive\.org|web\.archive\.org)/[^\s<>\"']+",
@@ -484,15 +486,46 @@ def metadata_flags(metadata: dict[str, Any]) -> list[str]:
 
 
 def ia_exists(identifier: str) -> bool:
-    result = subprocess.run(
-        ["ia", "metadata", identifier], capture_output=True, text=True, timeout=90
+    response = session().get(
+        IA_METADATA_URL + quote(identifier, safe=""), timeout=90
     )
-    if result.returncode != 0:
-        return False
-    try:
-        return "metadata" in json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return False
+    response.raise_for_status()
+    return bool(response.json().get("metadata", {}).get("identifier"))
+
+
+def solr_phrase(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def find_existing_ia_item(record: dict[str, Any]) -> str | None:
+    """Find an existing IA item by new/legacy ID or exact SBA provenance.
+
+    This intentionally searches all IA collections: an SBA record should not
+    be uploaded a second time merely because the earlier copy lives elsewhere.
+    Network/search failures raise and therefore fail closed before upload.
+    """
+    identifiers = (
+        sba_ia_identifier(record),
+        sba_ia_identifier(record, LEGACY_IA_IDENTIFIER_PREFIX),
+    )
+    for identifier in identifiers:
+        if ia_exists(identifier):
+            return identifier
+
+    source_url = solr_phrase(record["source_url"])
+    handle = solr_phrase(record["handle"])
+    query = (
+        f'(originalurl:"{source_url}" OR source:"{source_url}" '
+        f'OR identifier-access:"{handle}")'
+    )
+    response = session().get(
+        IA_SEARCH_URL,
+        params={"q": query, "fl[]": "identifier", "rows": 10, "output": "json"},
+        timeout=90,
+    )
+    response.raise_for_status()
+    documents = response.json().get("response", {}).get("docs") or []
+    return str(documents[0]["identifier"]) if documents else None
 
 
 def upload_records(
@@ -538,11 +571,7 @@ def upload_records(
         for record, files in candidates:
             identifier = sba_ia_identifier(record)
             error = None
-            legacy_identifier = sba_ia_identifier(record, LEGACY_IA_IDENTIFIER_PREFIX)
-            existing_identifier = next(
-                (candidate for candidate in (identifier, legacy_identifier) if ia_exists(candidate)),
-                None,
-            )
+            existing_identifier = find_existing_ia_item(record)
             stored_identifier = identifier
             if existing_identifier:
                 stored_identifier = existing_identifier
