@@ -202,6 +202,56 @@ class SbaHarvesterTests(unittest.TestCase):
             file_path.write_bytes(b"broken")
             self.assertFalse(sba.record_download_is_complete(record, root))
 
+    def test_prepare_upload_files_merges_pdf_parts_in_sequence(self):
+        try:
+            from pypdf import PdfReader, PdfWriter
+        except ImportError:
+            self.skipTest("pypdf is unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record = {
+                "handle": "20.500.12497/1",
+                "title": "Multipart",
+                "classification": "download_candidate",
+            }
+            folder = sba.item_directory(root, record)
+            folder.mkdir(parents=True)
+            states = []
+            for sequence, pages in ((1, 2), (2, 3)):
+                path = folder / f"{sequence:03d}_part{sequence}.pdf"
+                writer = PdfWriter()
+                for _ in range(pages):
+                    writer.add_blank_page(width=612, height=792)
+                with path.open("wb") as stream:
+                    writer.write(stream)
+                writer.close()
+                states.append({
+                    "bitstream_id": str(sequence),
+                    "name": path.name,
+                    "path": str(path),
+                    "size": path.stat().st_size,
+                    "sha256": sba.sha256_file(path),
+                    "status": "downloaded",
+                })
+            sba.write_json_atomic(folder / "manifest.json", {
+                "complete": True, "files": states, "updated_at": sba.utc_now(),
+            })
+
+            upload_files, assembly = sba.prepare_upload_files(record, root)
+            self.assertEqual([path.name for path in upload_files], ["sba.1.1.pdf"])
+            self.assertEqual(len(PdfReader(str(upload_files[0])).pages), 5)
+            self.assertEqual([item["name"] for item in assembly["inputs"]], [
+                "001_part1.pdf", "002_part2.pdf",
+            ])
+            self.assertEqual(assembly["output"]["pages"], 5)
+            self.assertTrue((folder / "001_part1.pdf").exists())
+            self.assertTrue((folder / "002_part2.pdf").exists())
+
+            # A second call validates and reuses the completed assembly.
+            reused_files, reused = sba.prepare_upload_files(record, root)
+            self.assertEqual(reused_files, upload_files)
+            self.assertEqual(reused["output"]["sha256"], assembly["output"]["sha256"])
+
     def test_download_limit_selects_next_incomplete_record(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "corpus"

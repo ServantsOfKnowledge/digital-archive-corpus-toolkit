@@ -335,6 +335,113 @@ def state_file_is_complete(state: dict[str, Any]) -> bool:
     return recorded_size > 0 and path.stat().st_size == recorded_size
 
 
+def downloaded_paths(record: dict[str, Any], root: Path) -> list[Path]:
+    """Return verified downloaded bitstreams in source sequence order."""
+    folder = item_directory(root, record)
+    states = sorted(
+        load_manifest(folder).get("files", []),
+        key=lambda state: (str(state.get("name") or ""), str(state.get("bitstream_id") or "")),
+    )
+    return [Path(state["path"]) for state in states if state_file_is_complete(state)]
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def prepare_upload_files(record: dict[str, Any], root: Path) -> tuple[list[Path], dict[str, Any] | None]:
+    """Merge ordered PDF parts and return the files that should go to IA.
+
+    Original parts remain untouched. Non-PDF bitstreams are uploaded alongside
+    the merged PDF. The assembly record makes a valid prior merge reusable.
+    """
+    files = downloaded_paths(record, root)
+    pdfs = [path for path in files if path.suffix.lower() == ".pdf"]
+    other_files = [path for path in files if path.suffix.lower() != ".pdf"]
+    if len(pdfs) <= 1:
+        return files, None
+
+    try:
+        from pypdf import PdfReader, PdfWriter
+    except ImportError as exc:
+        raise RuntimeError("Multi-part SBA books require pypdf: python3 -m pip install pypdf") from exc
+
+    folder = item_directory(root, record)
+    output = folder / f"{sba_ia_identifier(record)}.pdf"
+    assembly_path = folder / "assembly.json"
+    inputs = []
+    expected_pages = 0
+    for path in pdfs:
+        reader = PdfReader(str(path))
+        if reader.is_encrypted and reader.decrypt("") == 0:
+            raise ValueError(f"Cannot merge encrypted PDF without a password: {path}")
+        pages = len(reader.pages)
+        if pages <= 0:
+            raise ValueError(f"PDF contains no pages: {path}")
+        expected_pages += pages
+        inputs.append({
+            "path": str(path.resolve()),
+            "name": path.name,
+            "size": path.stat().st_size,
+            "sha256": sha256_file(path),
+            "pages": pages,
+        })
+
+    previous = {}
+    if assembly_path.exists():
+        try:
+            previous = json.loads(assembly_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            previous = {}
+    if previous.get("inputs") == inputs and previous.get("output", {}).get("path") == str(output.resolve()):
+        saved = previous.get("output", {})
+        if (
+            output.is_file()
+            and output.stat().st_size == int(saved.get("size") or 0)
+            and sha256_file(output) == saved.get("sha256")
+            and len(PdfReader(str(output)).pages) == expected_pages
+        ):
+            return [output, *other_files], previous
+
+    partial = output.with_suffix(output.suffix + ".part")
+    partial.unlink(missing_ok=True)
+    writer = PdfWriter()
+    try:
+        for path in pdfs:
+            writer.append(str(path))
+        with partial.open("wb") as stream:
+            writer.write(stream)
+        writer.close()
+        merged_pages = len(PdfReader(str(partial)).pages)
+        if merged_pages != expected_pages:
+            raise ValueError(
+                f"Merged PDF page mismatch: got {merged_pages}, expected {expected_pages}"
+            )
+        partial.replace(output)
+    except Exception:
+        partial.unlink(missing_ok=True)
+        raise
+
+    assembly = {
+        "source_handle": record["handle"],
+        "inputs": inputs,
+        "output": {
+            "path": str(output.resolve()),
+            "name": output.name,
+            "size": output.stat().st_size,
+            "sha256": sha256_file(output),
+            "pages": expected_pages,
+        },
+        "updated_at": utc_now(),
+    }
+    write_json_atomic(assembly_path, assembly)
+    return [output, *other_files], assembly
+
+
 def record_download_is_complete(record: dict[str, Any], root: Path) -> bool:
     if record["classification"] == "record_only_ia_linked":
         return True
@@ -549,7 +656,7 @@ def upload_records(
         rows = db.execute(
             "SELECT * FROM items WHERE metadata_json IS NOT NULL ORDER BY handle"
         ).fetchall()
-        candidates: list[tuple[dict[str, Any], list[Path]]] = []
+        candidates: list[dict[str, Any]] = []
         for row in rows:
             record = row_to_record(row)
             if record["handle"] in completed:
@@ -562,21 +669,17 @@ def upload_records(
                     (record["handle"], identifier, "skipped_existing_ia_reference", utc_now()),
                 )
                 continue
-            folder = item_directory(root, record)
-            files = sorted(
-                path for path in folder.iterdir()
-                if path.is_file() and path.name not in {"metadata.json", "manifest.json", "source_record.json"}
-            ) if folder.exists() else []
+            files = downloaded_paths(record, root)
             if not files or not record_download_is_complete(record, root):
                 continue
-            candidates.append((record, files))
+            candidates.append(record)
         db.commit()
         if limit is not None:
             candidates = candidates[:limit]
         if not candidates:
             logging.info("No downloaded records remain to upload")
             return
-        for record, files in candidates:
+        for record in candidates:
             identifier = sba_ia_identifier(record)
             error = None
             existing_identifier = find_existing_ia_item(record)
@@ -586,21 +689,41 @@ def upload_records(
                 logging.info("%s: skip; %s already exists", record["handle"], existing_identifier)
                 status = "already_on_ia"
             elif not execute:
-                logging.info("%s: would upload %s files as %s", record["handle"], len(files), identifier)
+                source_files = downloaded_paths(record, root)
+                pdf_count = sum(path.suffix.lower() == ".pdf" for path in source_files)
+                if pdf_count > 1:
+                    logging.info(
+                        "%s: would merge %s PDF parts and upload one document as %s",
+                        record["handle"], pdf_count, identifier,
+                    )
+                else:
+                    logging.info(
+                        "%s: would upload %s files as %s",
+                        record["handle"], len(source_files), identifier,
+                    )
                 status = "planned"
             else:
-                command = [
-                    "ia", "upload", identifier, *map(str, files),
-                    *metadata_flags(ia_metadata(record, collection)), "--checksum", "--verify",
-                ]
-                result = subprocess.run(command, capture_output=True, text=True, timeout=7200)
-                if result.returncode:
-                    status = "failed"
-                    error = (result.stderr or result.stdout).strip()
-                    logging.error("%s: %s", identifier, error)
-                else:
+                try:
+                    files, assembly = prepare_upload_files(record, root)
+                    if assembly:
+                        logging.info(
+                            "%s: merged %s parts into %s pages (%s)",
+                            record["handle"], len(assembly["inputs"]),
+                            assembly["output"]["pages"], assembly["output"]["name"],
+                        )
+                    command = [
+                        "ia", "upload", identifier, *map(str, files),
+                        *metadata_flags(ia_metadata(record, collection)), "--checksum", "--verify",
+                    ]
+                    result = subprocess.run(command, capture_output=True, text=True, timeout=7200)
+                    if result.returncode:
+                        raise RuntimeError((result.stderr or result.stdout).strip())
                     status = "uploaded"
                     logging.info("%s: uploaded", identifier)
+                except Exception as exc:
+                    status = "failed"
+                    error = str(exc)
+                    logging.error("%s: %s", identifier, error)
             db.execute(
                 "INSERT OR REPLACE INTO ia_uploads VALUES (?, ?, ?, ?, ?)",
                 (record["handle"], stored_identifier, status, error, utc_now()),

@@ -46,6 +46,8 @@ The adapter keeps download and upload operations behind explicit `--execute` fla
 
 SBA's bitstream endpoint requires `Accept: */*`; the downloader overrides its JSON API header for file requests and supplies the item-page referrer. Bitstreams explicitly marked locked by SBA have no public download URL and remain `skipped_locked_or_missing_url`.
 
+Before upload, an SBA item with multiple PDF bitstreams is assembled in source sequence order into one `sba.{handle-suffix}.1.pdf`. The original parts remain on disk and in `manifest.json`; only the merged PDF is sent to IA (plus any non-PDF bitstreams). `assembly.json` records every input path, size, SHA-256, page count, and the verified merged output. A valid existing assembly is reused on retries. Install `pypdf` if needed with `python3 -m pip install pypdf`. Single-PDF items are uploaded unchanged.
+
 New IA identifiers use the stable form `sba.{handle-suffix}.1`. Immediately before upload, the adapter checks the new identifier, the earlier `apu.sba.{handle-suffix}.1` form, and an archive-wide metadata search for the exact SBA source URL or Handle. A match under any identifier or collection is recorded as `already_on_ia` and is not uploaded again. The check fails closed on an IA lookup error rather than risking a duplicate. Use `--collection` only when intentionally overriding the default collection.
 
 [SBA's published policy](https://schoolbooksarchive.azimpremjiuniversity.edu.in/DataPolicy.html) restricts robotic harvesting of full items. Only use `--execute` under the archival-partner authorization applicable to this project.
