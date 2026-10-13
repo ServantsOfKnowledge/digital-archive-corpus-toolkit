@@ -40,3 +40,9 @@ session-ses_*.md
 *.token
 **/credentials*
 *.ini
+
+# Harvest runtime artifacts
+harvest.pid
+.monitor_state.json
+*_log.txt
+upload_progress.backup.*.json
