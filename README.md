@@ -1,376 +1,84 @@
 # Digital Archive Corpus Toolkit
 
-A comprehensive downloader, uploader, and corpus builder for digital archival collections hosted on the Tamil Digital Library (TDL). Uploads to Internet Archive under the **TamilVirtualAcademy** collection.
+Downloaders, harvesters and uploaders that build corpora from digital archives and publish them to the [Internet Archive](https://archive.org) (IA). Every tool is resumable, checks IA for existing items before downloading or uploading, and keeps destructive or outward-facing actions behind explicit flags.
 
-## School Books Archive metadata adapter
+## Projects
 
-`sba_harvester.py` incrementally inventories the [School Books Archive](https://schoolbooksarchive.azimpremjiuniversity.edu.in/), enriches each record with its public metadata and bitstream landing-page records, detects existing Internet Archive references, and produces JSONL/CSV exports plus a non-executing IA migration plan.
+| Project | Source | IA destination | Entry points | Docs |
+|---------|--------|----------------|--------------|------|
+| **Tamil Digital Library (TDL)** | tamildigitallibrary.in, 18 categories, ~90k items | `TamilVirtualAcademy` | `tdl_downloader.py`, `tdl_upload.py`, `tdl_multi_worker.py` | [docs/tdl.md](docs/tdl.md) |
+| **School Books Archive (SBA)** | schoolbooksarchive.azimpremjiuniversity.edu.in | `ServantsOfKnowledge` | `sba_harvester.py` | [docs/sba.md](docs/sba.md) |
+| **Anuvada Sampada** | anuvadasampada.azimpremjiuniversity.edu.in (OAI-PMH / EPrints) | `AzimPremjiUniversity` + `ServantsOfKnowledge` | `anuvada_harvester.py` | [docs/anuvada.md](docs/anuvada.md) |
+
+### TDL
+Scrapes articles by category, downloads PDFs and covers with IA-ready metadata, and uploads each file individually (no zip) so IA derive works. `tdl_multi_worker.py` runs several categories in parallel in a download → upload → delete pipeline; monitoring scripts (`monitor_harvest.py`, `monitor_realtime.py`) and progress-rebuild tools (`build_progress_from_ia_scraping.py`) support long unattended runs.
 
 ```bash
-# Complete paginated listing (resumable upserts into SQLite)
-python3 sba_harvester.py inventory
-
-# Fetch full public metadata and file records; safe to resume
-python3 sba_harvester.py enrich --workers 3
-
-# Export normalized records
-python3 sba_harvester.py export
-
-# Show progress and Archive.org source/PDF counts
-python3 sba_harvester.py status
-python3 sba_harvester.py status --json
-
-# Produce an IA plan; this does not download or upload anything
-python3 sba_harvester.py ia-plan
-
-# Preview or execute downloads for records without existing IA references
-python3 sba_harvester.py download --limit 10
-python3 sba_harvester.py download --limit 10 --execute
-
-# Preview or execute IA uploads. Local source files are never auto-deleted.
-python3 sba_harvester.py ia-upload --limit 10
-python3 sba_harvester.py ia-upload --limit 10 --execute
+python tdl_downloader.py fetch --cat-id 20 --dir tdl_corpus --workers 5
+python tdl_upload.py --cat Book --workers 3
+python3 tdl_multi_worker.py --total-workers 12 --categories-parallel 3
+python3 monitor_realtime.py --dashboard
 ```
 
-For a small verification run, add `--max-items 5` to `inventory` and `--limit 5` to `enrich`.
-
-All stages resume by default:
-
-- `inventory` checkpoints the next source offset after every page. Use `--restart` only to begin a new full synchronization pass.
-- `enrich` selects only records with missing metadata or a recorded error. `enrich --refresh` begins or resumes a checkpointed full refresh; after interruption, plain `enrich` continues that active refresh. Use `enrich --restart` only to discard that checkpoint and begin the full refresh again.
-- `download` selects the next incomplete records, checkpoints every completed file in each item's `manifest.json`, validates its saved byte size, and discards incomplete `.part` files before retrying.
-- `ia-upload` skips locally recorded completed/previously-existing items. Interrupted uploads safely retry the same identifier with IA checksum verification, so already-received files are not uploaded again.
-- `--limit` applies to the next pending records rather than the first records in the collection.
-
-The adapter keeps download and upload operations behind explicit `--execute` flags. It checks both source metadata/file records and the intended IA identifier before uploading, and it never automatically deletes local files. SBA uploads go only to `ServantsOfKnowledge` by default. Records containing an `archive.org` reference are classified as `skip_existing_ia_reference`.
-
-SBA's bitstream endpoint requires `Accept: */*`; the downloader overrides its JSON API header for file requests and supplies the item-page referrer. Bitstreams explicitly marked locked by SBA have no public download URL and remain `skipped_locked_or_missing_url`.
-
-Before upload, an SBA item with multiple PDF bitstreams is assembled in source sequence order into one `sba.{handle-suffix}.1.pdf`. The original parts remain on disk and in `manifest.json`; only the merged PDF is sent to IA (plus any non-PDF bitstreams). `assembly.json` records every input path, size, SHA-256, page count, and the verified merged output. A valid existing assembly is reused on retries. Install `pypdf` if needed with `python3 -m pip install pypdf`. Single-PDF items are uploaded unchanged.
-
-New IA identifiers use the stable form `sba.{handle-suffix}.1`. Immediately before upload, the adapter checks the new identifier, the earlier `apu.sba.{handle-suffix}.1` form, and an archive-wide metadata search for the exact SBA source URL or Handle. A match under any identifier or collection is recorded as `already_on_ia` and is not uploaded again. The check fails closed on an IA lookup error rather than risking a duplicate. Use `--collection` only when intentionally overriding the default collection.
-
-[SBA's published policy](https://schoolbooksarchive.azimpremjiuniversity.edu.in/DataPolicy.html) restricts robotic harvesting of full items. Only use `--execute` under the archival-partner authorization applicable to this project.
-
-## Anuvada Sampada sync adapter
-
-`anuvada_harvester.py` inventories [Anuvada Sampada](https://anuvadasampada.azimpremjiuniversity.edu.in/) through its OAI-PMH feed, enriches records from EPrints' JSON export, and compares every PDF with the current `AzimPremjiUniversity` collection before downloading anything. It preserves the existing identifiers: `apu.anuvadasampada.hin.{record}.{document}` for Hindi and `apu.anuvadasampada.kan.{record}` for Kannada.
+### SBA
+Incremental inventory → enrich → export → download → upload, backed by SQLite. Merges multipart books into one PDF, and blocks duplicates by checking several IA identifier forms plus a source-URL/Handle search (failing closed on lookup errors).
 
 ```bash
-# First run. All three stages resume safely after interruption.
+python3 sba_harvester.py inventory
+python3 sba_harvester.py enrich --workers 3
+python3 sba_harvester.py status
+python3 sba_harvester.py download --limit 10          # preview; add --execute to run
+```
+
+SBA's [data policy](https://schoolbooksarchive.azimpremjiuniversity.edu.in/DataPolicy.html) restricts robotic harvesting of full items; use `--execute` only under the applicable archival-partner authorization.
+
+### Anuvada Sampada
+Inventories via OAI-PMH, enriches from EPrints JSON, reconciles every PDF against the existing IA collection, and downloads/uploads only what is missing. Preserves existing `apu.anuvadasampada.*` identifiers.
+
+```bash
 python3 anuvada_harvester.py inventory --full
 python3 anuvada_harvester.py enrich --workers 4
 python3 anuvada_harvester.py reconcile-ia
-
-# Confirm exactly what exists and what is missing.
 python3 anuvada_harvester.py status
-python3 anuvada_harvester.py export
-
-# Preview, then download only the PDFs classified as missing_on_ia.
-python3 anuvada_harvester.py download --limit 10
-python3 anuvada_harvester.py download --limit 10 --execute
-
-# Preview, then upload only downloaded records still absent from IA.
-# New items go to both AzimPremjiUniversity and ServantsOfKnowledge.
-python3 anuvada_harvester.py ia-upload --limit 10
-python3 anuvada_harvester.py ia-upload --limit 10 --execute
 ```
 
-Future syncs use `python3 anuvada_harvester.py inventory` without `--full`; the saved OAI response timestamp limits the pass to changed records. If inventory stops midway, the next invocation starts from its saved OAI resumption token. Enrichment selects only new, changed, failed, or unfinished records; `enrich --refresh` starts a resumable full refresh. Export includes every source record, including deleted or metadata-only records without a PDF. Downloads preflight current EPrints metadata, send browser-compatible PDF headers, validate the recorded size and MD5, retain `.part` files for HTTP Range resume, and keep successfully downloaded PDFs. Source documents that EPrints reports as zero bytes, with the empty-file MD5, or whose canonical file URL returns HTTP 404 are classified as `source_unavailable` instead of being retried forever. Older database rows are checked and repaired automatically on their next download attempt. Uploads recheck the intended IA identifier immediately before invoking the `ia` CLI.
+## Documentation
 
-Run `reconcile-ia` before each download batch. It refreshes all matching IA items, then deduplicates by established identifier, exact source-file URL, and (only when unambiguous) source record ID. Both `download` and `ia-upload` are non-executing previews unless `--execute` is present. Uploads include both `AzimPremjiUniversity` and `ServantsOfKnowledge` collection metadata by default. To override the defaults, repeat the option as needed, for example `--collection AzimPremjiUniversity --collection ServantsOfKnowledge`.
+| Document | Contents |
+|----------|----------|
+| [docs/tdl.md](docs/tdl.md) | TDL pipeline overview, commands, resume/upload behaviour, categories, output layout, metadata fields |
+| [docs/tdl-harvest.md](docs/tdl-harvest.md) | Multi-worker harvest, rebuilding `upload_progress.json` from IA, monitoring, tuning, troubleshooting |
+| [docs/scripts.md](docs/scripts.md) | Full flag reference for TDL scripts and logging |
+| [docs/server-handoff.md](docs/server-handoff.md) | Moving upload/download work to a fresh server |
+| [docs/sba.md](docs/sba.md) | SBA adapter |
+| [docs/anuvada.md](docs/anuvada.md) | Anuvada Sampada adapter |
 
-## Scripts
-
-### `tdl_downloader.py`
-
-Scrapes, downloads, and indexes digital archive content from TDL.
-
-**Features:** Multi-category support (18 categories), automatic metadata extraction, parallel downloading with configurable workers, resume support via persistent progress tracking, corpus index generation (JSON/CSV), IA-ready metadata.
-
-```bash
-# List articles in a category
-python tdl_downloader.py list --cat-id 20 --output listing.json
-
-# Download from a listing file
-python tdl_downloader.py download --input listing.json --dir tdl_corpus --workers 5
-
-# Fetch (list + download) all articles
-python tdl_downloader.py fetch --cat-id 20 --dir tdl_corpus --workers 5
-
-# Download + upload immediately (pipeline mode)
-python tdl_downloader.py download --input listing.json --dir tdl_corpus --workers 5 --upload-immediately
-
-# Build corpus index
-python tdl_downloader.py corpus --dir tdl_corpus --csv
-```
-
-**Download Resume & Skip Logic:**
-- **Progress tracking:** Maintains `progress.json` with `completed`, `pending`, `failed` article IDs
-- **Resume mode** (`--resume`): Skips completed items, retries failed items
-- **Skip existing** (`--skip-existing PATH`): Scans an external directory for article IDs and marks them as completed (avoids re-downloading duplicates)
-- **Partial downloads:** Supports HTTP range requests to resume interrupted file transfers
-- **Retry behavior:** Automatically retries transient errors (timeout, connection reset) with exponential backoff
-- **IA deduplication:** With `--upload-immediately`, checks if item already exists on IA before downloading
-- **Auto-cleanup:** With `--upload-immediately`, deletes local files after successful upload
-
-### `tdl_upload.py`
-
-Uploads downloaded items to Internet Archive. Uploads individual files (PDF, cover.jpg, etc.) directly — **no zipping** — to allow IA derive to process content.
-
-**Features:**
-- Direct file upload (no zip) for better derive
-- `--cat` accepts multiple categories
-- `--corpus` to override corpus path (for external drives)
-- Atomic writes and retry logic for multi-process safety
-- Retry with exponential backoff on transient errors (timeout, connection, SlowDown)
-- Auto-detects already-on-IA items and skips them
-- **Source folder deletion on successful upload** (files are removed from disk after successful upload)
-- `language:tam` and `TamilVirtualAcademy` collection metadata
-- Transient error handling (SlowDown, timeout, connection errors)
-
-### `tdl_pdf_recovery.py`
-
-Detects Internet Archive PDF validation failures, redownloads affected TDL items, and retries upload.
-
-```bash
-python3 tdl_pdf_recovery.py --log-file logs/books_upload.log
-python3 tdl_pdf_recovery.py --log-file logs/books_upload.log --retry
-```
-
-Use this when upload logs contain `Uploaded content is unacceptable. - error checking pdf file`.
-
-### `tdl_server_resume.py`
-
-Prepares a fresh server checkout to pick up upload/download work without copying downloaded corpus files. The handoff package contains code, source listings, and upload state; the server redownloads content from TDL and resumes uploads from `upload_progress.json`.
-
-**Integrated download + upload pipeline** (downloads and uploads each item immediately):
-
-```bash
-tar -xzf tmvu-corpus-server-handoff.tar.gz
-cd tmvu-corpus-server-handoff
-python3 tdl_server_resume.py --restore-state
-python3 tdl_server_resume.py --download --cat Book Periodical --workers 3
-```
-
-**Safety net** (retry any items that failed during the pipeline):
-
-```bash
-python3 tdl_server_resume.py --start-uploads --cat Book Periodical --workers 3
-```
-
-**Multi-worker support:** The `--workers` flag is passed to `tdl_downloader.py` and `tdl_upload.py`, which both use thread pools for parallel processing. Categories are processed sequentially, but items within each category are handled concurrently.
-
-See `docs/server-handoff.md` for the full server setup and monitoring workflow.
-
-```bash
-# Preview
-python tdl_upload.py --dry-run
-
-# Upload specific categories
-python tdl_upload.py --cat Book Sculpture --workers 3
-
-# Upload from external drive
-python tdl_upload.py --cat Document --corpus "/Volumes/External/tdl_corpus" --workers 2
-
-# Retry failed
-python tdl_upload.py --retry-failed
-
-# Skip collection permission check
-python tdl_upload.py --cat Book --workers 5 --no-collection-check
-```
-
-Identifiers use the format `tdl.{article_id}-{transliterated_title}`, truncated to 80 chars max. Includes `original_url` metadata pointing back to the source TDL article page. See `docs/scripts.md` for full flag documentation.
-
-### `tdl_backfill_url.py`
-
-Backfills `original_url` metadata on already-uploaded IA items. Extracts numeric article IDs from uploaded identifiers and adds the TDL source URL.
-
-```bash
-# Preview
-python tdl_backfill_url.py --dry-run
-
-# Run with 8 parallel workers
-python tdl_backfill_url.py --workers 8
-```
-
-### `tdl_dashboard.py`
-
-Web dashboard for monitoring all operations — process status, category progress, start/stop/restart controls.
-
-```bash
-python tdl_dashboard.py --port 8080
-```
-
-Access at http://localhost:8080.
-
-### `tdl_status.py`
-
-Live dashboard showing download + upload progress across all categories.
+## Repository layout
 
 ```
-Category                DL /  Total     %     Size    Ul   Rem  Status
-──────────────────── ─────   ──────  ────  ───────  ────  ────  ────────────
-Book                 12016 /  42043   29%     909G     -     - ↑uploading
-...
-TOTAL                25277 /  89608   28%  FREE  135G  1680    49
-```
-
-- **DL:** items on disk (downloaded)
-- **Ul:** items uploaded to IA (per-category, from `upload_progress.json`)
-- **Rem:** items removed from disk after successful upload
-- Status indicators: `↓downloading`, `↑uploading`
-
-### `tdl_fix_metadata.py`
-
-Batch retrofits existing IA items with `TamilVirtualAcademy` collection + `language:tam` metadata. Uses `ia search` to find items, then applies metadata via `ia metadata --modify`.
-
-```bash
-python tdl_fix_metadata.py
-```
-
-### `tdl_unzip_and_push.py`
-
-For items uploaded via the old zip-based method: downloads the zip from IA, extracts the individual files, re-uploads them to the same identifier, then removes the zip. This triggers IA derive to process the actual content (PDFs, images) rather than treating a zip as opaque.
-
-```bash
-# Process all uploaded items
-python tdl_unzip_and_push.py --workers 3
-
-# Single item
-python tdl_unzip_and_push.py --ident tdl.12345-foo
-
-# Preview
-python tdl_unzip_and_push.py --dry-run
-
-# Reset progress
-python tdl_unzip_and_push.py --reset
-```
-
-Progress tracked in `unzip_done.json` (resumable).
-
-## Categories
-
-| ID | Category | Items |
-|----|----------|-------|
-| 1 | Audio | 125 |
-| 2 | Video | 10 |
-| 3 | Map | 1,862 |
-| 4 | Photograph | 53 |
-| 5 | Author Bio | 196 |
-| 6 | Pre-historic | 166 |
-| 7 | Excavation | 55 |
-| 8 | Inscription | 1,922 |
-| 9 | Religious Place | 370 |
-| 10 | Sculpture | 1,645 |
-| 11 | Coin | 673 |
-| 12 | Copper Plate | 192 |
-| 13 | Historical Monument | 124 |
-| 14 | Painting | 65 |
-| 20 | Book | 42,043 |
-| 21 | Periodical | 29,951 |
-| 22 | Palmleaf | 5,387 |
-| 27 | Document | 4,769 |
-
-## Script Status & Workflow
-
-### Download Workflow
-1. **Fetch listing** (`list` or `fetch`): Queries TDL API for articles in a category
-2. **Download with resume**: Tracks progress in `progress.json`
-   - Completed items are skipped automatically
-   - Failed items can be retried with `--resume` flag
-   - Supports `--skip-existing PATH` to avoid re-downloading duplicates from external drives
-3. **IA deduplication** (with `--upload-immediately`): Checks if item already exists on IA before downloading
-4. **Metadata extraction**: Scrapes metadata for each article into `metadata.json`
-5. **Corpus indexing** (`corpus`): Generates JSON/CSV indexes of downloaded items
-
-### Upload Workflow
-1. **Scan categories**: Finds all folders with `metadata.json`
-2. **Check IA**: Verifies if item already exists on Internet Archive (skips if found)
-3. **Upload files**: Uploads PDF, cover, and metadata to IA
-4. **Track progress**: Records uploaded items in `upload_progress.json`
-5. **Clean up**: Automatically deletes source folders after successful upload
-6. **Retry failed**: Failed uploads are logged in `upload_failed.json` for later retry
-7. **Pipeline mode** (`--upload-immediately`): Download and upload happen as a single atomic step per item
-
-### Key Characteristics
-- **Downloads are deleted after successful upload** to manage local disk space
-- **Resume support**: All operations support resume via progress JSON files and HTTP range requests
-- **Parallel processing**: All operations support configurable worker threads
-- **Error recovery**: Transient errors are automatically retried with exponential backoff
-- **Deduplication**: `--skip-existing` flag prevents re-downloading items from other drives
-- **IA deduplication**: Checks IA before downloading/uploading to avoid duplicate work
-- **Pipeline mode**: `--upload-immediately` downloads and uploads each item atomically
-- **Auto-cleanup**: Local files are removed after successful upload (can be retried on failure)
-- **Atomic operations**: Multi-threaded uploads use atomic file writes to prevent corruption
-
-## Output Structure
-
-```
-tdl_corpus/
-├── {Category}/
-│   ├── {article_id}_{title}/
-│   │   ├── metadata.json        # IA-ready metadata
-│   │   ├── {pdf_filename}.pdf    # Document PDF
-│   │   └── cover.jpg             # Cover image
-│   └── ...
-├── progress.json                  # Download progress
-├── upload_progress.json           # Upload progress (per-category tracking)
-├── upload_failed.json             # Failed uploads
-├── unzip_done.json                # Unzip+push progress
-└── unzip_failed.json              # Unzip failures
-
-logs/
-├── books.log                      # Download logs
-├── books_upload.log               # Upload logs
-├── periodical.log
-├── periodical_upload.log
-├── big_cats_upload.log
-├── unzip_push.log
-├── batch.log                      # Batch runner output
-├── batch_download.log             # Batch download progress
-└── batch_error_*.log              # Per-category error logs
-
-server_state/                      # Packaged handoff state for server resumes
-├── upload_progress.json           # Uploaded IDs to skip on IA
-├── upload_failed.json             # Failed uploads, if present
-├── pdf_redownload.json            # PDF recovery queue, if present
-└── listing_*.json                 # Source listings for redownload
+tdl_*.py                    TDL downloader, uploader, recovery, status, dashboard, multi-worker
+sba_harvester.py            SBA adapter
+anuvada_harvester.py        Anuvada Sampada adapter
+analyze_state.py            Pending work per TDL category
+build_progress_from_ia_scraping.py, rebuild_progress_from_ia.py, categorize_progress.py
+                            Rebuild/annotate upload_progress.json from IA
+monitor_harvest.py, monitor_realtime.py, monitor_harvest.sh
+                            Harvest monitoring
+start_harvest.sh, stop_harvest.sh, status.sh
+                            Background harvest control
+tests/                      Unit tests for the SBA and Anuvada adapters
+docs/                       Detailed documentation
 ```
 
 ## Requirements
 
-- Python 3.7+
-- `requests`, `beautifulsoup4`, `tqdm`
-- `internetarchive` (for `ia` CLI): `pip install internetarchive && ia configure`
-- `unidecode` (for Tamil transliteration in identifiers)
+Python 3.7+ and:
 
 ```bash
 pip install requests beautifulsoup4 tqdm internetarchive unidecode
+pip install pypdf          # SBA multipart merging
+ia configure               # IA credentials
 ```
-
-## Corpus Fields (metadata.json)
-
-| Field | Description |
-|-------|-------------|
-| `title` | Document title |
-| `creator` | Author |
-| `publisher` | Publisher |
-| `date` | Publication year |
-| `language` | Language |
-| `subject` | Keywords/subjects |
-| `description` | Full description |
-| `source` | Source/location |
-| `identifier` | Article ID |
-| `original_url` | Source URL |
-| `pages` | Page count |
-| `edition` | Edition info |
-| `volume` | Volume info |
-| `collection` | Collection name |
-| `mediatype` | Internet Archive mediatype |
-| `scrape_date` | When metadata was scraped |
-| `pdf_url` | Original PDF URL |
-| `cover_url` | Original cover image URL |
 
 ---
 
