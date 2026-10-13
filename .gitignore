@@ -46,3 +46,7 @@ harvest.pid
 .monitor_state.json
 *_log.txt
 upload_progress.backup.*.json
+
+# Shodhganga
+shg_corpus/
+shg_harvest.pid
