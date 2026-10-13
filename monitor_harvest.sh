@@ -24,8 +24,8 @@ while true; do
             # Check if log was modified in last 5 minutes
             if [ $(find "$log" -mmin -5 2>/dev/null | wc -l) -gt 0 ]; then
                 # Count recent downloads
-                recent=$(tail -100 "$log" 2>/dev/null | grep -c "Downloaded\|Uploaded\|SUCCESS" 2>/dev/null || echo "0")
-                errors=$(tail -100 "$log" 2>/dev/null | grep -c "ERROR\|FAILED\|Failed" 2>/dev/null || echo "0")
+                recent=$(tail -100 "$log" 2>/dev/null | grep -c "Downloaded\|Uploaded\|SUCCESS" 2>/dev/null || true)
+                errors=$(tail -100 "$log" 2>/dev/null | grep -c "ERROR\|FAILED\|Failed" 2>/dev/null || true)
 
                 printf "%-20s: %3d recent actions, %3d errors\n" "$cat_name" "$recent" "$errors"
             fi
