@@ -268,6 +268,25 @@ def list_articles(cat_id: int = 20, sub_cat_id: str = "", inner_cat_id: str = ""
 # Step 2: Extract metadata + file URLs from article detail page
 # ---------------------------------------------------------------------------
 
+def extract_gallery_images(soup) -> list:
+    """Return ordered, de-duplicated image URLs of a palm-leaf page's fancybox gallery."""
+    urls = []
+    for el in soup.select('[data-fancybox="gallery"]'):
+        src = el.get("data-src") or (el.find("img") or {}).get("src", "")
+        if src:
+            full = urllib.parse.urljoin(BASE_URL, src.strip())
+            if full not in urls:
+                urls.append(full)
+    return urls
+
+
+def gallery_filename(url: str) -> str:
+    """Local/IA file name for a gallery image (same scheme the PDF name used: dirs joined by '_')."""
+    path = urllib.parse.unquote(urllib.parse.urlparse(url).path)
+    rel = path.split("/palmleaf/", 1)[-1].lstrip("/")
+    return safe_filename(rel)
+
+
 def extract_article_data(article_url: str) -> dict:
     """Fetch article page and extract all metadata and download URLs."""
     resp = fetch(article_url)
@@ -313,6 +332,7 @@ def extract_article_data(article_url: str) -> dict:
         "cover_url": "",
         "pdf_filename": "",
         "marc_url": "",
+        "image_urls": [],
         "scrape_date": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -338,6 +358,8 @@ def extract_article_data(article_url: str) -> dict:
             if "cover" in src.lower() and src.endswith((".jpg", ".png", ".jpeg")):
                 data["cover_url"] = urllib.parse.urljoin(BASE_URL, src)
                 break
+
+    data["image_urls"] = extract_gallery_images(soup)
 
     meta_title = soup.find("input", {"id": "article-meta-title"})
     if meta_title and meta_title.get("value"):
@@ -584,6 +606,7 @@ def process_article(article_url: str, output_dir: Path,
         "pdf": False, "cover": False,
     }
 
+    pdf_path = None
     if download_pdf and data.get("pdf_url"):
         pdf_ext = os.path.splitext(urllib.parse.urlparse(data["pdf_url"]).path)[1] or ".pdf"
         pdf_name = data.get("pdf_filename") or f"{art_id}{pdf_ext}"
@@ -596,6 +619,21 @@ def process_article(article_url: str, output_dir: Path,
             result["status"] = "complete"
         else:
             result["status"] = "pdf_failed"
+
+    # Palm-leaf pages are an image gallery; pdf_url only points at the first image
+    gallery = data.get("image_urls") or []
+    if download_pdf and len(gallery) > 1:
+        failed_imgs = 0
+        for img_url in gallery:
+            img_path = art_dir / gallery_filename(img_url)
+            if img_path == pdf_path:
+                continue
+            if not download_file(img_url, img_path, desc=img_path.name[:50]):
+                failed_imgs += 1
+        result["images"] = len(gallery)
+        if failed_imgs:
+            result["status"] = "pdf_failed"
+            result["image_failures"] = failed_imgs
 
     if download_cover and data.get("cover_url"):
         ext = os.path.splitext(urllib.parse.urlparse(data["cover_url"]).path)[1] or ".jpg"

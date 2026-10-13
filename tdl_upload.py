@@ -367,7 +367,7 @@ def scan_and_upload_items(category_filter=None, corpus_path=None, max_size_mb=No
                 continue
             futures[pool.submit(upload_item, cat, folder, no_collection_check)] = (cat, folder, ident)
 
-        for fut in as_completed(futures自成立以来):
+        for fut in as_completed(futures):
             cat, folder, ident = futures[fut]
             try:
                 fut.result()

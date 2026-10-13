@@ -13,6 +13,7 @@ Downloads TDL content, builds an IA-ready corpus, and uploads to Internet Archiv
 | `tdl_server_resume.py` | Resume work on a fresh server without copying the corpus |
 | `tdl_backfill_url.py` | Backfill `original_url` on already-uploaded IA items |
 | `tdl_fix_metadata.py` | Retrofit `TamilVirtualAcademy` collection + `language:tam` metadata |
+| `tdl_palmleaf_fix.py` | Audit Palmleaf IA items for missing gallery images; `--fix` uploads them |
 | `tdl_unzip_and_push.py` | Convert old zip-based uploads into individual files |
 | `tdl_status.py` / `tdl_dashboard.py` | Terminal status table / web dashboard |
 
