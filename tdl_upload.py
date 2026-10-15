@@ -212,7 +212,7 @@ def run_with_retry(cmd: list, max_retries=3, timeout=1200) -> subprocess.Complet
         return r
     return r
 
-def upload_item(cat: str, folder: Path, no_collection_check=False) -> bool:
+def _upload_item_locked(cat: str, folder: Path, no_collection_check=False) -> bool:
     base_identifier = make_identifier(cat, folder)
 
     if not folder.exists():
@@ -297,6 +297,15 @@ def upload_item(cat: str, folder: Path, no_collection_check=False) -> bool:
         raise RuntimeError(err)
 
     raise RuntimeError(f"All identifier suffixes exhausted for {base_identifier}")
+
+def upload_item(cat: str, folder: Path, no_collection_check=False) -> bool:
+    """Serialize uploads per item across processes; the loser then sees it on IA and skips."""
+    import fcntl
+    lock_dir = Path(__file__).parent / ".upload_locks"
+    lock_dir.mkdir(exist_ok=True)
+    with open(lock_dir / (hashlib.md5(str(folder).encode()).hexdigest() + ".lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        return _upload_item_locked(cat, folder, no_collection_check)
 
 def folder_size_mb(folder: Path) -> float:
     return sum(f.stat().st_size for f in folder.iterdir() if f.is_file()) / (1024 * 1024)
