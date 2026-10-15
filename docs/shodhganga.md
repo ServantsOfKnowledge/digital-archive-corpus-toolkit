@@ -7,6 +7,7 @@ Indian PhD theses from [Shodhganga](https://shodhganga.inflibnet.ac.in) (INFLIBN
 | `shg_downloader.py` | Original toolkit: `list`, `list-communities`, `manifest`, `pipeline`, `status` (imported from the former standalone `shodaganga` project; its metadata-only placeholder uploader was deliberately not carried over) |
 | `shg_harvest.py` | Automated harvest: `preflight`, `plan`, `reconcile-ia`, `run`, `status` |
 | `shg_harvest.sh` | `start` / `stop` / `status` wrapper (nohup, graceful stop via `harvest.stop`) |
+| `shg_beta_harvest.py` | Alternative source (beta portal, metadata only): `probe`, `harvest`, `status`, `build` |
 
 ## State of the collected data (reviewed 2026-10-13)
 
@@ -27,6 +28,55 @@ Corpus dir: `~/shodaganga/shg_corpus` (not in git).
 Fixed on import: `upload_to_ia()` treated any existing IA item as done, which would have skipped the PDF for every placeholder. It now skips only items that already have a non-empty PDF.
 
 **Policy: no item is created on IA without its PDF.** The earlier placeholder items (18,622 from the original project plus 19 created on 2026-10-14 from local metadata) are left untouched; `run` adds the PDF to them. Review them before deciding whether to remove the stubs (`--remove-placeholder` only deletes the stub `.txt`, not the item).
+
+## Alternative source: betasg (metadata only)
+
+While the main portal serves an Anubis challenge to scripts, **https://betasg.inflibnet.ac.in** (DSpace 9 beta) exposes its anonymous discover API.
+
+### Commands
+
+```bash
+# 1. sanity-check the API: reachable? total items? sample records + field count
+python3 shg_beta_harvest.py probe
+
+# 2. trial run: fetch 3 pages (300 items) with 3 workers, then inspect
+python3 shg_beta_harvest.py harvest --dir shg_beta_corpus --limit-pages 3 --workers 3
+python3 shg_beta_harvest.py status  --dir shg_beta_corpus
+
+# 3. full run: all 6,761 pages (~4 h); safe to re-run - completed pages are skipped
+#    and failed pages retried. Graceful stop: touch shg_beta_corpus/harvest.stop
+python3 shg_beta_harvest.py harvest --dir shg_beta_corpus --workers 6
+python3 shg_beta_harvest.py status  --dir shg_beta_corpus            # add --offline to skip the live probe
+
+# 4. merge page chunks into one deduplicated file (refuses if pages are missing)
+python3 shg_beta_harvest.py build   --dir shg_beta_corpus            # -> shg_beta_corpus/metadata.jsonl
+python3 shg_beta_harvest.py build   --dir shg_beta_corpus --partial  # build what exists anyway
+```
+
+### Flags
+
+| Command | Flag | Default | Meaning |
+|---------|------|---------|---------|
+| all | `--dir` | `shg_beta_corpus` | Corpus directory holding `pages/`, `source.json`, output |
+| all | `--timeout` | `120` | Per-request timeout (seconds); 100-item pages take ~20 s |
+| `harvest` | `--workers` | `6` | Concurrent page fetches (tested up to 12; 4–8 is polite) |
+| `harvest` | `--limit-pages N` | – | Fetch at most N pages (trial runs) |
+| `harvest` | `--max-failures` | `25` | Stop after this many failed pages |
+| `status` | `--offline` | off | Skip the live API probe |
+| `build` | `--partial` | off | Build even when some pages are missing |
+
+Exit codes: `0` success, `1` fatal (API unreachable / no source / build refused), `2` partial (failed or cancelled pages — just re-run `harvest`).
+
+| Property | Value (2026-10-15) |
+|----------|--------------------|
+| Items | 676,009 → 6,761 pages of 100 (the API clamps larger page sizes) |
+| Latency | ~20 s per 100-item page; pages parallelise cleanly (6 workers ≈ 6× throughput) |
+| Full run | ≈ 6,761 pages ÷ 6 workers × 20 s ≈ **4 h**; re-run `harvest` resumes and retries failures |
+| Fields | Full DSpace metadata per item (~25 `dc.*` fields incl. abstract, university, guide) |
+| Not usable | OAI-PMH returns `noRecordsMatch` (empty), `/core/items` needs auth (401) — discover search is the only anonymous route |
+| PDFs | **Not fetched** — this harvest is metadata only; PDF download still needs the main portal/8443 proxy arrangement |
+
+Runtime files in `<dir>`: `pages/page-NNNNN.json` (atomic chunks; existing pages are skipped on re-run), `counts.jsonl` (items per page for `status`), `source.json` (totals seen), `harvest.stop` (touch to halt gracefully), and after `build`, `metadata.jsonl` (one record per item: `handle`, `uuid`, `title`, `last_modified`, `withdrawn`, full `metadata`; ~2 GB for the full corpus). `build` refuses to run with missing pages unless `--partial`; `--limit-pages N` gives a small trial run.
 
 ## Harvest workflow
 

@@ -49,5 +49,6 @@ upload_progress.backup.*.json
 
 # Shodhganga
 shg_corpus/
+shg_beta_corpus/
 shg_harvest.pid
 .upload_locks/

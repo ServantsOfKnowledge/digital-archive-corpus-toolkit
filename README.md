@@ -9,7 +9,7 @@ Downloaders, harvesters and uploaders that build corpora from digital archives a
 | **Tamil Digital Library (TDL)** | tamildigitallibrary.in, 18 categories, ~90k items | `TamilVirtualAcademy` | `tdl_downloader.py`, `tdl_upload.py`, `tdl_multi_worker.py` | [docs/tdl.md](docs/tdl.md) |
 | **School Books Archive (SBA)** | schoolbooksarchive.azimpremjiuniversity.edu.in | `ServantsOfKnowledge` | `sba_harvester.py` | [docs/sba.md](docs/sba.md) |
 | **Anuvada Sampada** | anuvadasampada.azimpremjiuniversity.edu.in (OAI-PMH / EPrints) | `AzimPremjiUniversity` + `ServantsOfKnowledge` | `anuvada_harvester.py` | [docs/anuvada.md](docs/anuvada.md) |
-| **Shodhganga** | shodhganga.inflibnet.ac.in, ~579k PhD theses, ~14.8 TB | `shodhganga` | `shg_downloader.py`, `shg_harvest.py` | [docs/shodhganga.md](docs/shodhganga.md) |
+| **Shodhganga** | shodhganga.inflibnet.ac.in, ~579k PhD theses, ~14.8 TB | `shodhganga` | `shg_downloader.py`, `shg_harvest.py`, `shg_beta_harvest.py` | [docs/shodhganga.md](docs/shodhganga.md) |
 
 ### TDL
 Scrapes articles by category, downloads PDFs and covers with IA-ready metadata, and uploads each file individually (no zip) so IA derive works. `tdl_multi_worker.py` runs several categories in parallel in a download → upload → delete pipeline; monitoring scripts (`monitor_harvest.py`, `monitor_realtime.py`) and progress-rebuild tools (`build_progress_from_ia_scraping.py`) support long unattended runs.
@@ -51,6 +51,14 @@ python3 shg_harvest.py preflight --dir shg_corpus
 python3 shg_harvest.py plan --dir shg_corpus
 python3 shg_harvest.py reconcile-ia --dir shg_corpus
 python3 shg_harvest.py run --dir shg_corpus --limit 20           # preview; add --execute to run
+```
+
+While the main portal serves an Anubis bot challenge to scripts, `shg_beta_harvest.py` harvests the full item metadata (676k items, ~25 fields incl. abstracts) from the beta portal's anonymous DSpace discover API — metadata only, resumable, ~4 h at `--workers 6`.
+
+```bash
+python3 shg_beta_harvest.py probe
+python3 shg_beta_harvest.py harvest --dir shg_beta_corpus --workers 6
+python3 shg_beta_harvest.py build  --dir shg_beta_corpus        # -> metadata.jsonl
 ```
 
 ## Documentation
